@@ -1,1 +1,21 @@
 @import "tailwindcss";
+
+/* Prototype design tokens (warm paper, terracotta accent). */
+@theme {
+  --color-bg: #faf8f5;
+  --color-surface: #ffffff;
+  --color-text: #1b1917;
+  --color-muted: #7a6f63;
+  --color-accent: #a85c32;
+  --color-amber: #b0761a;
+  --color-divider: #e8e1d8;
+
+  --font-body: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-newsreader), Georgia, serif;
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+}
