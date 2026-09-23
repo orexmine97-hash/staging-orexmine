@@ -1,0 +1,668 @@
+// OREXMINE data model — buy-and-resell mineral trading platform.
+//
+// Baked-in decisions (see conversation / README):
+//  1. Money: Decimal(18,2) naira (major unit, kobo in the 2dp) + a `currency`
+//     column on the money-bearing record. No BigInt minor units.
+//  2. Actor references (createdById, audit actor) are scalar strings, NOT FKs
+//     to User — identity is external OIDC, and the audit log must freeze the
+//     actor's name/role at write time.
+//  3. Purchase offer + PO are ONE PurchaseOrder with a status lifecycle.
+//  4. Lifecycles are enums; human refs (PO-0231) sit beside cuid PKs.
+//  5. Miner vetting `tier` (FRD names) is separate from operational status
+//     (Organization.status).
+//  6. Phase-2 items (pooling, stock alerts, cost allocation, ESG, retention
+//     config, forward sales, configurable checklists) are intentionally absent.
+//
+// Quantities: Decimal(18,6) tonnes. Grades: Decimal(6,3) percent.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────
+
+enum OrganizationType {
+  OREXMINE
+  MINER
+  BUYER
+}
+
+enum UserRole {
+  ADMIN
+  PROCUREMENT
+  SALES
+  QUALITY_COMPLIANCE
+  WAREHOUSE_LOGISTICS
+  FINANCE
+  MINER
+  BUYER
+}
+
+enum OrganizationStatus {
+  PENDING
+  ACTIVE
+  SUSPENDED
+  REJECTED
+}
+
+// FRD FR-04 vetting tiers (distinct from operational status above).
+enum MinerTier {
+  PREFERRED
+  CONDITIONAL
+  PROBATIONARY
+  NOT_ONBOARDED
+}
+
+enum MinerDocumentState {
+  ON_FILE
+  EXPIRED
+  MISSING
+  PENDING
+}
+
+enum KycStatus {
+  PENDING
+  APPROVED
+  SUSPENDED
+  REJECTED
+  RENEWAL_DUE
+}
+
+// Procurement lifecycle (FRD 6.1); starts at the offer stages.
+enum PurchaseOrderStatus {
+  DRAFT
+  OFFERED
+  ACCEPTED
+  IN_TRANSIT
+  RECEIVED
+  QC_HOLD
+  QC_PASSED
+  QC_FAILED
+  PAYABLE
+  PAID
+  CLOSED
+  CANCELLED
+}
+
+enum DeliveryStatus {
+  PENDING
+  RECEIVED
+  VERIFIED
+  DISCREPANCY
+}
+
+enum QcDecisionType {
+  PASS
+  HOLD
+  FAIL
+  RETEST
+}
+
+enum BatchStatus {
+  QC_HOLD
+  QC_FAIL
+  SELLABLE
+  QUARANTINE
+  DEPLETED
+  WRITTEN_OFF
+}
+
+// Immutable stock movement event (FRD FR-25).
+enum StockMovementType {
+  RECEIVE
+  RESERVE
+  RELEASE
+  DISPATCH
+  DELIVER
+  RETURN
+  ADJUST
+  WRITE_OFF
+}
+
+enum ReservationStatus {
+  ACTIVE
+  RELEASED
+  CONSUMED
+  EXPIRED
+}
+
+enum QuoteStatus {
+  DRAFT
+  QUOTED
+  CONFIRMED
+  EXPIRED
+  DECLINED
+}
+
+// Sales lifecycle (FRD 6.2). PARTIAL/DELAYED cover fulfillment exceptions.
+enum SalesOrderStatus {
+  DRAFT
+  CONFIRMED
+  RESERVED
+  PARTIAL
+  DISPATCHED
+  DELIVERED
+  DELAYED
+  INVOICED
+  PAID
+  CLOSED
+  CANCELLED
+}
+
+enum ShipmentDirection {
+  INBOUND
+  OUTBOUND
+}
+
+enum ShipmentStatus {
+  PENDING
+  IN_TRANSIT
+  HELD
+  DELIVERED
+  FAILED
+  RETURNED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  ISSUED
+  PART_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentType {
+  BUYER_RECEIPT
+  MINER_PAYOUT
+}
+
+enum AssetApprovalStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  SUPERSEDED
+  REJECTED
+}
+
+// ─────────────────────────────────────────────────────────────
+// Organizations, users, parties
+// ─────────────────────────────────────────────────────────────
+
+model Organization {
+  id        String             @id @default(cuid())
+  name      String
+  type      OrganizationType
+  status    OrganizationStatus @default(PENDING)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  users     User[]
+  miner     Miner?
+  buyer     Buyer?
+}
+
+model User {
+  id             String       @id @default(cuid())
+  organizationId String
+  email          String       @unique
+  name           String
+  role           UserRole
+  active         Boolean      @default(true)
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+  organization   Organization @relation(fields: [organizationId], references: [id])
+
+  @@index([organizationId, role])
+}
+
+model Miner {
+  id                   String          @id @default(cuid())
+  organizationId       String          @unique
+  reference            String          @unique // e.g. MIN-0031
+  miningTitleReference String?
+  rcNumber             String?
+  siteDescription      String?
+  siteLatitude         Decimal?        @db.Decimal(9, 6)
+  siteLongitude        Decimal?        @db.Decimal(9, 6)
+  tier                 MinerTier       @default(NOT_ONBOARDED)
+  // Vetting sub-scores (FRD FR-03). Rubric/thresholds are app config.
+  scoreLegal           Int?
+  scoreSource          Int?
+  scoreQuality         Int?
+  scoreReliability     Int?
+  monthlyCapTonnes     Decimal?        @db.Decimal(18, 6)
+  bankAccountRef       String?
+  bankVerified         Boolean         @default(false)
+  nextReviewAt         DateTime?
+  organization         Organization    @relation(fields: [organizationId], references: [id])
+  documents            MinerDocument[]
+  purchaseOrders       PurchaseOrder[]
+  createdAt            DateTime        @default(now())
+  updatedAt            DateTime        @updatedAt
+}
+
+// Vetting checklist row (FRD FR-02). `document` links the uploaded file once
+// supplied; state carries expired/missing without a file present.
+model MinerDocument {
+  id        String             @id @default(cuid())
+  minerId   String
+  name      String
+  state     MinerDocumentState @default(MISSING)
+  expiresAt DateTime?
+  miner     Miner              @relation(fields: [minerId], references: [id])
+  documents Document[]
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  @@index([minerId])
+}
+
+model Buyer {
+  id                 String       @id @default(cuid())
+  organizationId     String       @unique
+  reference          String       @unique // e.g. BUY-0007
+  kycStatus          KycStatus    @default(PENDING)
+  endUseDeclaration  String?
+  creditLimit        Decimal?     @db.Decimal(18, 2)
+  currency           String       @default("NGN")
+  depositRequiredPct Int? // whole-percent deposit requirement, if any
+  prepaymentRequired Boolean      @default(false)
+  kycApprovedById    String? // OIDC subject; no FK (see header)
+  kycApprovedAt      DateTime?
+  organization       Organization @relation(fields: [organizationId], references: [id])
+  quotes             Quote[]
+  salesOrders        SalesOrder[]
+  createdAt          DateTime     @default(now())
+  updatedAt          DateTime     @updatedAt
+}
+
+// ─────────────────────────────────────────────────────────────
+// Procurement: PurchaseOrder → Delivery → Assay → QcDecision
+// ─────────────────────────────────────────────────────────────
+
+model PurchaseOrder {
+  id               String              @id @default(cuid())
+  reference        String              @unique // e.g. PO-0231
+  minerId          String
+  status           PurchaseOrderStatus @default(DRAFT)
+  commodity        String
+  unit             String              @default("t")
+  declaredQuantity Decimal             @db.Decimal(18, 6)
+  declaredGrade    Decimal?            @db.Decimal(6, 3)
+  unitPrice        Decimal             @db.Decimal(18, 2) // NGN per unit
+  currency         String              @default("NGN")
+  deliveryTerms    String?
+  targetLocation   String?
+  validUntil       DateTime?
+  createdById      String // OIDC subject; no FK (see header)
+  miner            Miner               @relation(fields: [minerId], references: [id])
+  deliveries       Delivery[]
+  shipments        Shipment[] // inbound
+  payouts          Payment[] // miner payouts against this PO
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@index([minerId, status])
+}
+
+model Delivery {
+  id               String           @id @default(cuid())
+  reference        String           @unique // e.g. DEL-0187
+  purchaseOrderId  String
+  status           DeliveryStatus   @default(PENDING)
+  declaredQuantity Decimal          @db.Decimal(18, 6)
+  verifiedQuantity Decimal?         @db.Decimal(18, 6)
+  unit             String           @default("t")
+  declaredGrade    Decimal?         @db.Decimal(6, 3)
+  // Ownership / risk records (FRD 6.3) — receipt, QC, payment, title can differ.
+  titleTransferAt  DateTime?
+  custodyLocation  String?
+  carrierRef       String?
+  insuranceRef     String?
+  receivedAt       DateTime?
+  purchaseOrder    PurchaseOrder    @relation(fields: [purchaseOrderId], references: [id])
+  assays           Assay[]
+  qcDecisions      QcDecision[]
+  batches          InventoryBatch[]
+  documents        Document[]
+  createdAt        DateTime         @default(now())
+  updatedAt        DateTime         @updatedAt
+
+  @@index([purchaseOrderId, status])
+}
+
+model Assay {
+  id              String     @id @default(cuid())
+  reference       String     @unique // e.g. ASY-0142
+  deliveryId      String
+  laboratory      String?
+  sampleReference String?
+  testedGrade     Decimal?   @db.Decimal(6, 3)
+  purity          Decimal?   @db.Decimal(6, 3)
+  contaminants    String?
+  assayDate       DateTime?
+  delivery        Delivery   @relation(fields: [deliveryId], references: [id])
+  documents       Document[]
+  createdAt       DateTime   @default(now())
+
+  @@index([deliveryId])
+}
+
+model QcDecision {
+  id            String         @id @default(cuid())
+  deliveryId    String
+  decision      QcDecisionType
+  gradeVariance Decimal?       @db.Decimal(6, 3) // tested − declared, pp
+  reason        String
+  decidedById   String // OIDC subject; no FK (see header)
+  decidedByName String // frozen at decision time
+  decidedAt     DateTime       @default(now())
+  delivery      Delivery       @relation(fields: [deliveryId], references: [id])
+
+  @@index([deliveryId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Inventory & traceability
+// ─────────────────────────────────────────────────────────────
+
+model InventoryBatch {
+  id                 String              @id @default(cuid())
+  batchNumber        String              @unique // e.g. OX-GC-2409-014
+  commodity          String
+  grade              Decimal             @db.Decimal(6, 3)
+  gradeUnit          String              @default("%")
+  unit               String              @default("t")
+  status             BatchStatus         @default(QC_HOLD)
+  location           String
+  // Quantity buckets (FRD FR-23). Invariant enforced in app txn:
+  // available + reserved + dispatched + delivered + rejected + held ≤ quantity.
+  quantity           Decimal             @db.Decimal(18, 6)
+  availableQuantity  Decimal             @default(0) @db.Decimal(18, 6)
+  reservedQuantity   Decimal             @default(0) @db.Decimal(18, 6)
+  dispatchedQuantity Decimal             @default(0) @db.Decimal(18, 6)
+  deliveredQuantity  Decimal             @default(0) @db.Decimal(18, 6)
+  rejectedQuantity   Decimal             @default(0) @db.Decimal(18, 6)
+  heldQuantity       Decimal             @default(0) @db.Decimal(18, 6)
+  unitCost           Decimal?            @db.Decimal(18, 2) // landed cost, NGN per unit
+  unitPrice          Decimal?            @db.Decimal(18, 2) // ask, NGN per unit
+  currency           String              @default("NGN")
+  // Traceability (FRD FR-24): batch → delivery → PO → miner; assay/QC via delivery.
+  sourceDeliveryId   String?
+  mineralAssetId     String?
+  sourceDelivery     Delivery?           @relation(fields: [sourceDeliveryId], references: [id])
+  mineralAsset       MineralAsset?       @relation(fields: [mineralAssetId], references: [id])
+  movements          StockMovement[]
+  reservations       Reservation[]
+  quotes             Quote[]
+  salesOrders        SalesOrder[]
+  sourceVerification SourceVerification?
+  documents          Document[]
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+
+  @@index([commodity, grade, status])
+  @@index([sourceDeliveryId])
+}
+
+// Append-only movement log (FRD FR-25). refType/refId point at the reservation,
+// SO, shipment, etc. that caused the movement.
+model StockMovement {
+  id        String            @id @default(cuid())
+  batchId   String
+  type      StockMovementType
+  quantity  Decimal           @db.Decimal(18, 6)
+  reason    String?
+  refType   String?
+  refId     String?
+  actorId   String // OIDC subject; no FK (see header)
+  actorName String
+  batch     InventoryBatch    @relation(fields: [batchId], references: [id])
+  createdAt DateTime          @default(now())
+
+  @@index([batchId, createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Sales: Quote → SalesOrder → Reservation → Shipment → Invoice → Payment
+// ─────────────────────────────────────────────────────────────
+
+model Quote {
+  id               String         @id @default(cuid())
+  reference        String         @unique // e.g. QTE-0086
+  buyerId          String
+  batchId          String
+  status           QuoteStatus    @default(DRAFT)
+  quantity         Decimal        @db.Decimal(18, 6)
+  unitPrice        Decimal        @db.Decimal(18, 2)
+  currency         String         @default("NGN")
+  // Snapshot for realized-margin history (FRD FR-45/47) — frozen at quote time.
+  unitCostSnapshot Decimal?       @db.Decimal(18, 2)
+  deliveryTerms    String?
+  destination      String?
+  validUntil       DateTime?
+  createdById      String // OIDC subject; no FK (see header)
+  buyer            Buyer          @relation(fields: [buyerId], references: [id])
+  batch            InventoryBatch @relation(fields: [batchId], references: [id])
+  salesOrder       SalesOrder?
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@index([buyerId, status])
+  @@index([batchId])
+}
+
+model SalesOrder {
+  id                 String           @id @default(cuid())
+  reference          String           @unique // e.g. SO-0121
+  buyerId            String
+  batchId            String
+  quoteId            String?          @unique
+  status             SalesOrderStatus @default(CONFIRMED)
+  // Separate fulfillment buckets (FRD 6.2 / acceptance #6).
+  orderedQuantity    Decimal          @db.Decimal(18, 6)
+  reservedQuantity   Decimal          @default(0) @db.Decimal(18, 6)
+  dispatchedQuantity Decimal          @default(0) @db.Decimal(18, 6)
+  deliveredQuantity  Decimal          @default(0) @db.Decimal(18, 6)
+  invoicedQuantity   Decimal          @default(0) @db.Decimal(18, 6)
+  paidQuantity       Decimal          @default(0) @db.Decimal(18, 6)
+  unitPrice          Decimal          @db.Decimal(18, 2) // frozen at confirmation
+  unitCostSnapshot   Decimal?         @db.Decimal(18, 2)
+  currency           String           @default("NGN")
+  deliveryTerms      String?
+  destination        String?
+  exceptionNote      String?
+  confirmedAt        DateTime?
+  createdById        String // OIDC subject; no FK (see header)
+  buyer              Buyer            @relation(fields: [buyerId], references: [id])
+  batch              InventoryBatch   @relation(fields: [batchId], references: [id])
+  quote              Quote?           @relation(fields: [quoteId], references: [id])
+  reservations       Reservation[]
+  shipments          Shipment[] // outbound
+  invoices           Invoice[]
+  documents          Document[]
+  createdAt          DateTime         @default(now())
+  updatedAt          DateTime         @updatedAt
+
+  @@index([buyerId, status])
+  @@index([batchId])
+}
+
+// The crux of the atomic-reservation slice (FRD FR-26/39/40). Only ACTIVE
+// reservations count against a batch's available quantity.
+model Reservation {
+  id            String            @id @default(cuid())
+  reference     String            @unique // e.g. RSV-0071
+  batchId       String
+  salesOrderId  String?
+  status        ReservationStatus @default(ACTIVE)
+  quantity      Decimal           @db.Decimal(18, 6)
+  expiresAt     DateTime?
+  releaseReason String?
+  createdById   String // OIDC subject; no FK (see header)
+  batch         InventoryBatch    @relation(fields: [batchId], references: [id])
+  salesOrder    SalesOrder?       @relation(fields: [salesOrderId], references: [id])
+  createdAt     DateTime          @default(now())
+  updatedAt     DateTime          @updatedAt
+
+  @@index([batchId, status])
+  @@index([salesOrderId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Logistics, invoicing, payments
+// ─────────────────────────────────────────────────────────────
+
+// Inbound (PO) or outbound (SO) — exactly one link is set.
+model Shipment {
+  id              String            @id @default(cuid())
+  reference       String            @unique // e.g. SHP-0342
+  direction       ShipmentDirection
+  status          ShipmentStatus    @default(PENDING)
+  purchaseOrderId String?
+  salesOrderId    String?
+  carrier         String?
+  route           String?
+  trackingRef     String?
+  expectedAt      DateTime?
+  cost            Decimal?          @db.Decimal(18, 2)
+  currency        String            @default("NGN")
+  podReference    String? // proof of delivery
+  purchaseOrder   PurchaseOrder?    @relation(fields: [purchaseOrderId], references: [id])
+  salesOrder      SalesOrder?       @relation(fields: [salesOrderId], references: [id])
+  documents       Document[]
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+
+  @@index([salesOrderId])
+  @@index([purchaseOrderId])
+}
+
+model Invoice {
+  id           String        @id @default(cuid())
+  reference    String        @unique // e.g. INV-0219
+  salesOrderId String
+  status       InvoiceStatus @default(DRAFT)
+  amount       Decimal       @db.Decimal(18, 2)
+  amountPaid   Decimal       @default(0) @db.Decimal(18, 2)
+  currency     String        @default("NGN")
+  terms        String?
+  dueAt        DateTime?
+  externalRef  String? // external accounting reference (FRD FR-52)
+  salesOrder   SalesOrder    @relation(fields: [salesOrderId], references: [id])
+  payments     Payment[]
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  @@index([salesOrderId, status])
+}
+
+// Buyer receipt (against an invoice) or miner payout (against a PO).
+model Payment {
+  id              String         @id @default(cuid())
+  reference       String         @unique
+  type            PaymentType
+  amount          Decimal        @db.Decimal(18, 2)
+  currency        String         @default("NGN")
+  method          String?
+  externalRef     String? // reconciliation / GL reference (FRD FR-52)
+  invoiceId       String?
+  purchaseOrderId String?
+  recordedById    String // OIDC subject; no FK (see header)
+  paidAt          DateTime       @default(now())
+  invoice         Invoice?       @relation(fields: [invoiceId], references: [id])
+  purchaseOrder   PurchaseOrder? @relation(fields: [purchaseOrderId], references: [id])
+
+  @@index([invoiceId])
+  @@index([purchaseOrderId])
+}
+
+// ─────────────────────────────────────────────────────────────
+// Compliance, documents, 3D assets, audit
+// ─────────────────────────────────────────────────────────────
+
+// Proves an active batch came from a vetted, licensed miner (FRD FR-59).
+model SourceVerification {
+  id             String         @id @default(cuid())
+  batchId        String         @unique
+  method         String
+  reference      String?
+  verifiedById   String // OIDC subject; no FK (see header)
+  verifiedByName String
+  verifiedAt     DateTime       @default(now())
+  batch          InventoryBatch @relation(fields: [batchId], references: [id])
+  documents      Document[]
+}
+
+// Uploaded file attachment. Exactly one owner FK is set; storageKey points at
+// object storage once wired.
+model Document {
+  id                   String              @id @default(cuid())
+  kind                 String // e.g. PDF, IMG
+  name                 String
+  storageKey           String?
+  uploadedById         String? // OIDC subject; no FK (see header)
+  minerDocumentId      String?
+  deliveryId           String?
+  assayId              String?
+  batchId              String?
+  shipmentId           String?
+  salesOrderId         String?
+  sourceVerificationId String?
+  minerDocument        MinerDocument?      @relation(fields: [minerDocumentId], references: [id])
+  delivery             Delivery?           @relation(fields: [deliveryId], references: [id])
+  assay                Assay?              @relation(fields: [assayId], references: [id])
+  batch                InventoryBatch?     @relation(fields: [batchId], references: [id])
+  shipment             Shipment?           @relation(fields: [shipmentId], references: [id])
+  salesOrder           SalesOrder?         @relation(fields: [salesOrderId], references: [id])
+  sourceVerification   SourceVerification? @relation(fields: [sourceVerificationId], references: [id])
+  createdAt            DateTime            @default(now())
+}
+
+// Reusable, versioned 3D/representative asset (FRD FR-89/90). Kept separate
+// from live batch data on purpose.
+model MineralAsset {
+  id               String              @id @default(cuid())
+  commodity        String
+  version          String
+  modelUrl         String?
+  posterUrl        String
+  license          String?
+  sourceProvenance String?
+  approvalStatus   AssetApprovalStatus @default(DRAFT)
+  approvedById     String? // OIDC subject; no FK (see header)
+  approvedAt       DateTime?
+  fileSizeBytes    Int?
+  optimization     Json?
+  inventoryBatches InventoryBatch[]
+  createdAt        DateTime            @default(now())
+  updatedAt        DateTime            @updatedAt
+
+  @@unique([commodity, version])
+}
+
+// Append-only audit trail (FRD FR-77, NFR-02). Actor is denormalized so the
+// entry stays truthful even if the user record later changes.
+model AuditEvent {
+  id         String   @id @default(cuid())
+  actorId    String // OIDC subject; no FK (see header)
+  actorName  String
+  actorRole  UserRole
+  action     String
+  recordType String
+  recordId   String
+  before     String?
+  after      String?
+  reason     String?
+  createdAt  DateTime @default(now())
+
+  @@index([recordType, recordId])
+  @@index([createdAt])
+}
