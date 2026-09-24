@@ -23,6 +23,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
             <nav className="flex gap-6 text-sm text-muted">
               <Link href="/" className="hover:text-text">Showcase</Link>
               <Link href="/catalog" className="hover:text-text">Catalog</Link>
+              <Link href="/console" className="hover:text-text">Console</Link>
             </nav>
           </div>
         </header>
