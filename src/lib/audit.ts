@@ -24,6 +24,17 @@ export async function authorizeFor(record: Record, ...allowed: UserRole[]): Prom
 }
 
 export async function logDenied(actor: Actor, action: string, recordType: string, recordId: string) {
+  await logAudit(actor, `${action}`, recordType, recordId, { reason: "permission denied" });
+}
+
+// Append-only audit write for a completed privileged action (NFR-02, FR-77).
+export async function logAudit(
+  actor: Actor,
+  action: string,
+  recordType: string,
+  recordId: string,
+  extra?: { before?: string; after?: string; reason?: string },
+) {
   await prisma.auditEvent.create({
     data: {
       actorId: actor.id,
@@ -32,7 +43,9 @@ export async function logDenied(actor: Actor, action: string, recordType: string
       action,
       recordType,
       recordId,
-      reason: "permission denied",
+      before: extra?.before,
+      after: extra?.after,
+      reason: extra?.reason,
     },
   });
 }

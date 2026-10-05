@@ -18,10 +18,22 @@ function stockLabel(available: number, quantity: number) {
   return { text: "Low stock", cls: "text-amber" };
 }
 
-export default async function CatalogPage() {
+export default async function CatalogPage({ searchParams }: PageProps<"/catalog">) {
+  const { q } = await searchParams;
+  const query = (typeof q === "string" ? q : "").trim();
+
   // Only QC-passed, sellable batches ever reach the buyer (FR-80).
   const batches = await prisma.inventoryBatch.findMany({
-    where: { status: "SELLABLE" },
+    where: {
+      status: "SELLABLE",
+      ...(query && {
+        OR: [
+          { batchNumber: { contains: query, mode: "insensitive" } },
+          { commodity: { contains: query, mode: "insensitive" } },
+          { location: { contains: query, mode: "insensitive" } },
+        ],
+      }),
+    },
     orderBy: [{ commodity: "asc" }, { grade: "desc" }],
   });
 
@@ -31,7 +43,19 @@ export default async function CatalogPage() {
       <p className="mt-1 text-sm text-muted">
         {batches.length} sellable {batches.length === 1 ? "batch" : "batches"} ·{" "}
         {fmtTonnes(batches.reduce((a, b) => a + Number(b.availableQuantity), 0))} available
+        {query && (
+          <>
+            {" "}· matching &ldquo;{query}&rdquo;{" "}
+            <Link href="/catalog" className="text-accent hover:underline">clear</Link>
+          </>
+        )}
       </p>
+
+      {batches.length === 0 && (
+        <p className="mt-10 rounded-lg border border-divider bg-surface p-8 text-center text-sm text-muted">
+          No sellable batches{query ? <> match &ldquo;{query}&rdquo;</> : ""}.
+        </p>
+      )}
 
       <ul className="mt-8 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
         {batches.map((b) => {
