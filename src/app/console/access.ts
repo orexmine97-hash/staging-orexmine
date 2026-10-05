@@ -22,7 +22,7 @@ export const NAV: NavItem[] = [
   { key: "compliance", label: "Compliance", href: null },
   { key: "reports", label: "Reports", href: null },
   { key: "audit", label: "Audit log", href: "/console/audit" },
-  { key: "administration", label: "Administration", href: null },
+  { key: "administration", label: "Administration", href: "/console/administration" },
 ];
 
 // Which roles may access each module (per FRD §5). ADMIN is omitted — it always
@@ -66,6 +66,7 @@ const PATH_MODULE: Record<string, string> = {
   qc: "qc",
   inventory: "inventory",
   audit: "audit",
+  administration: "administration",
 };
 export function moduleForPath(pathname: string): string {
   const seg = pathname.replace(/^\/console\/?/, "").split("/")[0];

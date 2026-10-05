@@ -1,8 +1,6 @@
 import { UserRole } from "@prisma/client";
-import { auth0, ROLES_CLAIM } from "@/lib/auth0";
+import { auth0 } from "@/lib/auth0";
 import type { Actor } from "@/lib/reservations";
-
-export { ROLES_CLAIM };
 
 export class AuthError extends Error {
   constructor(
@@ -29,9 +27,12 @@ export const STAFF_ROLES: readonly UserRole[] = [
 ];
 export const isStaff = (role: UserRole) => STAFF_ROLES.includes(role);
 
-export function roleFromClaim(claim: unknown): UserRole | null {
-  const list = Array.isArray(claim) ? claim : claim == null ? [] : [claim];
-  return (list.find((r) => typeof r === "string" && VALID_ROLES.has(r)) as UserRole) ?? null;
+// Reads the role stamped onto the session from the DB at login (see auth0.ts).
+// A deactivated account (active === false) resolves to no role.
+export function sessionRole(user: unknown): UserRole | null {
+  const u = user as Record<string, unknown> | null | undefined;
+  if (!u || u.active === false) return null;
+  return typeof u.role === "string" && VALID_ROLES.has(u.role) ? (u.role as UserRole) : null;
 }
 
 // Resolves the authenticated principal from the Auth0 session. Server actions
@@ -41,9 +42,9 @@ export async function getSessionActor(): Promise<Actor> {
   if (!session?.user) {
     throw new AuthError("UNAUTHENTICATED", "Sign in required.");
   }
-  const role = roleFromClaim(session.user[ROLES_CLAIM]);
+  const role = sessionRole(session.user);
   if (!role) {
-    throw new AuthError("NO_ROLE", "This account has no OREXMINE role assigned.");
+    throw new AuthError("NO_ROLE", "This account has no active OREXMINE role assigned.");
   }
   return {
     id: session.user.sub, // OIDC subject — matches the *ById columns in the schema

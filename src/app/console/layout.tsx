@@ -1,5 +1,5 @@
 import { auth0, isAuthConfigured } from "@/lib/auth0";
-import { ROLES_CLAIM, roleFromClaim } from "@/lib/auth";
+import { sessionRole } from "@/lib/auth";
 import { ConsoleNav } from "./nav";
 import { ROLE_LABEL } from "./access";
 
@@ -9,7 +9,7 @@ import { ROLE_LABEL } from "./access";
 export default async function ConsoleLayout({ children }: LayoutProps<"/console">) {
   const session = isAuthConfigured ? await auth0.getSession() : null;
   const user = session?.user;
-  const role = roleFromClaim(user?.[ROLES_CLAIM]);
+  const role = sessionRole(user);
   const roleLabel = role ? ROLE_LABEL[role] ?? role : null;
   const name = user?.name ?? user?.email ?? null;
 

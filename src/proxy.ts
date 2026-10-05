@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 import { auth0, isAuthConfigured } from "@/lib/auth0";
-import { ROLES_CLAIM, isStaff, roleFromClaim } from "@/lib/auth";
+import { isStaff, sessionRole } from "@/lib/auth";
 import { canAccess, moduleForPath } from "@/app/console/access";
 
 // Next 16's middleware (formerly middleware.ts). Delegates to the Auth0 SDK,
@@ -25,7 +25,7 @@ export default async function proxy(req: NextRequest) {
     if (!session?.user) {
       return NextResponse.redirect(new URL("/auth/login?returnTo=/console", req.url));
     }
-    const role = roleFromClaim(session.user[ROLES_CLAIM]);
+    const role = sessionRole(session.user);
     if (!role || !isStaff(role)) {
       return NextResponse.redirect(new URL("/?e=forbidden", req.url));
     }
