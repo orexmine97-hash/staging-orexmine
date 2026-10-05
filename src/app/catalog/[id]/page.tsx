@@ -2,6 +2,7 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { batchValue, fmtGrade, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
+import { MineralShowcase } from "../mineral-showcase";
 
 export const dynamic = "force-dynamic"; // live facts from the transactional API (FR-85)
 
@@ -62,15 +63,15 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
       <Link href="/catalog" className="text-sm text-muted hover:text-text">← Catalog</Link>
 
       <div className="mt-4 grid gap-8 md:grid-cols-2">
-        {/* Presentation aid — poster placeholder; 3D viewer is a later increment. */}
-        <div className="flex aspect-square items-center justify-center rounded-lg border border-divider bg-gradient-to-br from-amber/10 to-accent/20 text-center">
-          <div>
-            <p className="font-heading text-2xl font-semibold text-accent">
-              {COMMODITY_LABEL[batch.commodity] ?? batch.commodity}
-            </p>
-            <p className="mt-1 text-xs text-muted">Representative model — presentation only</p>
-          </div>
-        </div>
+        {/* Presentation aid — only APPROVED assets are shown; live facts sit beside it. */}
+        <MineralShowcase
+          asset={
+            batch.mineralAsset && batch.mineralAsset.approvalStatus === "APPROVED"
+              ? { posterUrl: batch.mineralAsset.posterUrl, modelUrl: batch.mineralAsset.modelUrl }
+              : null
+          }
+          label={COMMODITY_LABEL[batch.commodity] ?? batch.commodity}
+        />
 
         <div>
           <h1 className="font-heading text-3xl font-semibold">
