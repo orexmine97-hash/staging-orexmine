@@ -18,3 +18,8 @@ export const fmtMoney = (v: Num) => {
 };
 
 export const batchValue = (available: Num, unitPrice: Num) => n(available) * n(unitPrice);
+
+// ponytail: UTC, no locale/tz. Ops console reads this fine; localize when a
+// customer-facing surface needs it.
+export const fmtDate = (d: Date | string | null | undefined) =>
+  d ? new Date(d).toISOString().slice(0, 16).replace("T", " ") : "—";
