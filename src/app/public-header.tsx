@@ -73,7 +73,7 @@ export function PublicHeader({ userName }: { userName?: string | null }) {
               <input
                 type="search"
                 name="q"
-                placeholder="Search batch, mineral or grade"
+                placeholder="Search batches"
                 className="min-w-0 flex-1 bg-transparent text-[15px] font-medium text-ink placeholder:text-muted focus:outline-none"
               />
             </label>
