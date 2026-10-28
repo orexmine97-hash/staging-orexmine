@@ -373,7 +373,7 @@ export default async function Home() {
             {MINERALS.map(([key, chip, sub]) => (
               <Link
                 key={key}
-                href={`/catalog?q=${key}`}
+                href={`/catalog?comm=${key}`}
                 className="relative flex min-h-[250px] flex-col justify-end overflow-hidden rounded-3xl lg:min-h-[380px]"
                 style={{ background: "radial-gradient(100% 80% at 50% 35%, #fbfaf6 0%, #e4e8e2 78%)" }}
               >
