@@ -1,17 +1,10 @@
 import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
-import { batchValue, fmtGrade, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
+import { COMMODITY, batchValue, commodityLabel, fmtGrade, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
 import { MineralShowcase } from "../mineral-showcase";
 
 export const dynamic = "force-dynamic"; // live facts from the transactional API (FR-85)
-
-const COMMODITY_LABEL: Record<string, string> = {
-  gold: "Gold concentrate",
-  tin: "Cassiterite (tin)",
-  coltan: "Columbite–tantalite",
-  leadzinc: "Lead–zinc concentrate",
-};
 
 export default async function BatchDetail({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
@@ -59,10 +52,10 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
   ];
 
   return (
-    <main className="mx-auto max-w-5xl px-4 py-10">
-      <Link href="/catalog" className="text-sm text-muted hover:text-text">← Catalog</Link>
+    <main className="mx-auto max-w-[1280px] px-[clamp(16px,3vw,40px)] pb-24 pt-10">
+      <Link href="/catalog" className="text-sm font-semibold text-muted hover:text-text">← Inventory</Link>
 
-      <div className="mt-4 grid gap-8 md:grid-cols-2">
+      <div className="mt-4 grid gap-8 md:grid-cols-2 lg:gap-14">
         {/* Presentation aid — only APPROVED assets are shown; live facts sit beside it. */}
         <MineralShowcase
           asset={
@@ -70,16 +63,18 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
               ? { posterUrl: batch.mineralAsset.posterUrl, modelUrl: batch.mineralAsset.modelUrl }
               : null
           }
-          label={COMMODITY_LABEL[batch.commodity] ?? batch.commodity}
+          label={commodityLabel(batch.commodity)}
+          img={COMMODITY[batch.commodity]?.img}
         />
 
         <div>
-          <h1 className="font-heading text-3xl font-semibold">
-            {COMMODITY_LABEL[batch.commodity] ?? batch.commodity}
+          <span className="inline-flex rounded-full bg-[#d9e6de] px-2.5 py-0.5 text-[13px] font-bold text-[#245a4a]">QC passed</span>
+          <h1 className="mt-3 font-heading text-[clamp(28px,3.4vw,44px)] font-semibold leading-[1.08] tracking-[-0.03em]">
+            {commodityLabel(batch.commodity)}
           </h1>
           <p className="mt-1 text-sm text-muted">{batch.batchNumber}</p>
 
-          <dl className="mt-6 divide-y divide-divider rounded-lg border border-divider bg-surface">
+          <dl className="mt-6 divide-y divide-divider rounded-3xl bg-surface px-2">
             {facts.map(([k, v]) => (
               <div key={k} className="flex justify-between px-4 py-3 text-sm">
                 <dt className="text-muted">{k}</dt>
@@ -91,7 +86,7 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
           <button
             disabled
             title="Reservation runs through the Trade Desk once authentication is wired."
-            className="mt-4 w-full cursor-not-allowed rounded-md bg-accent px-5 py-3 text-sm font-medium text-white opacity-50"
+            className="mt-4 min-h-12 w-full cursor-not-allowed rounded-xl bg-accent px-5 text-[15px] font-bold text-white opacity-50"
           >
             Request quote — via Trade Desk
           </button>
@@ -99,12 +94,12 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
       </div>
 
       <section className="mt-12">
-        <h2 className="font-heading text-xl font-semibold">Traceability</h2>
+        <h2 className="font-heading text-2xl font-semibold tracking-[-0.02em]">Traceability</h2>
         <p className="mt-1 text-sm text-muted">
           Every sellable batch traces back to its delivery, purchase order, vetted
           supplier, assay, and quality decision.
         </p>
-        <dl className="mt-4 divide-y divide-divider rounded-lg border border-divider bg-surface">
+        <dl className="mt-4 divide-y divide-divider rounded-3xl bg-surface px-2">
           {chain.map(([k, v]) => (
             <div key={k} className="flex justify-between px-4 py-3 text-sm">
               <dt className="text-muted">{k}</dt>

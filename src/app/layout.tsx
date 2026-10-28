@@ -1,11 +1,11 @@
 import type { Metadata } from "next";
-import { Manrope, Newsreader } from "next/font/google";
+import { Montserrat, Mulish } from "next/font/google";
 import { auth0, isAuthConfigured } from "@/lib/auth0";
-import { PublicHeader } from "./public-header";
+import { PublicHeader, SiteFooter } from "./public-header";
 import "./globals.css";
 
-const manrope = Manrope({ subsets: ["latin"], variable: "--font-manrope" });
-const newsreader = Newsreader({ subsets: ["latin"], variable: "--font-newsreader" });
+const mulish = Mulish({ subsets: ["latin"], variable: "--font-mulish" });
+const montserrat = Montserrat({ subsets: ["latin"], weight: ["600", "700"], variable: "--font-montserrat" });
 
 export const metadata: Metadata = {
   title: "OREXMINE — Mineral Showcase",
@@ -17,16 +17,13 @@ export default async function RootLayout({ children }: LayoutProps<"/">) {
   const userName = session?.user ? (session.user.name ?? session.user.email ?? null) : null;
 
   return (
-    <html lang="en" className={`${manrope.variable} ${newsreader.variable}`} suppressHydrationWarning>
+    <html lang="en" className={`${mulish.variable} ${montserrat.variable}`} suppressHydrationWarning>
       <body suppressHydrationWarning>
         <PublicHeader userName={userName} />
 
         {children}
 
-        <footer className="mx-auto max-w-6xl px-4 py-10 text-xs text-muted">
-          Live inventory from the transactional API. A representative model is a
-          presentation aid, not proof of a batch&rsquo;s grade, quantity, or provenance.
-        </footer>
+        <SiteFooter />
       </body>
     </html>
   );
