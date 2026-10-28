@@ -23,3 +23,12 @@ export const batchValue = (available: Num, unitPrice: Num) => n(available) * n(u
 // customer-facing surface needs it.
 export const fmtDate = (d: Date | string | null | undefined) =>
   d ? new Date(d).toISOString().slice(0, 16).replace("T", " ") : "—";
+
+// Buyer-facing commodity names + their 3D illustration (public/assets/landing).
+export const COMMODITY: Record<string, { label: string; short: string; img: string }> = {
+  gold: { label: "Gold concentrate", short: "Gold concentrate", img: "/assets/landing/gold.webp" },
+  tin: { label: "Cassiterite (tin)", short: "Cassiterite", img: "/assets/landing/cassiterite.webp" },
+  coltan: { label: "Columbite–tantalite", short: "Coltan", img: "/assets/landing/coltan.webp" },
+  leadzinc: { label: "Lead–zinc concentrate", short: "Lead–zinc", img: "/assets/landing/lead-zinc.webp" },
+};
+export const commodityLabel = (c: string) => COMMODITY[c]?.label ?? c;

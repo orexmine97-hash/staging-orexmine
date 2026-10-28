@@ -1,17 +1,21 @@
 @import "tailwindcss";
 
-/* Prototype design tokens (warm paper, terracotta accent). */
+/* Design tokens from orexmine.vercel.app (cool paper, ink, terracotta accent). */
 @theme {
-  --color-bg: #faf8f5;
+  --color-bg: #f8f9fb;
   --color-surface: #ffffff;
-  --color-text: #1b1917;
-  --color-muted: #7a6f63;
-  --color-accent: #a85c32;
-  --color-amber: #b0761a;
-  --color-divider: #e8e1d8;
+  --color-soft: #eef0f3;
+  --color-text: #0f1a17;
+  --color-ink: #0f1a17;
+  --color-muted: #55625c;
+  --color-accent: #a2582a;
+  --color-accent-soft: #f6ebe1;
+  --color-amber: #93501f;
+  --color-divider: #d3dbd3;
+  --color-qc: #7fd4ba;
 
-  --font-body: var(--font-manrope), ui-sans-serif, system-ui, sans-serif;
-  --font-heading: var(--font-newsreader), Georgia, serif;
+  --font-body: var(--font-mulish), ui-sans-serif, system-ui, sans-serif;
+  --font-heading: var(--font-montserrat), ui-sans-serif, system-ui, sans-serif;
 }
 
 body {
@@ -26,9 +30,19 @@ body {
 select {
   appearance: none;
   -webkit-appearance: none;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%237a6f63' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16' fill='none' stroke='%2355625c' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 6l4 4 4-4'/%3E%3C/svg%3E");
   background-repeat: no-repeat;
   background-position: right 0.7rem center;
   background-size: 0.7rem;
   padding-right: 2rem;
+}
+
+/* Landing stock ticker: two copies of the list slide by half their width. */
+@keyframes ox-ticker { to { transform: translate3d(-50%, 0, 0); } }
+.ox-ticker-track { animation: ox-ticker 100s linear infinite; }
+.ox-ticker:hover .ox-ticker-track,
+.ox-ticker:focus-within .ox-ticker-track { animation-play-state: paused; }
+@media (prefers-reduced-motion: reduce) {
+  .ox-ticker-track { animation: none; }
+  .ox-ticker-view { overflow-x: auto; }
 }
