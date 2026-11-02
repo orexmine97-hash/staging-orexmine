@@ -1,7 +1,16 @@
 import { prisma } from "@/lib/prisma";
 import { commodityLabel, fmtDate, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
 import { expectedMargin } from "@/lib/sales";
-import { confirmQuoteAction, createQuoteAction, declineQuoteAction, issueQuoteAction } from "@/app/actions/sales";
+import { expireReservations } from "@/lib/reservations";
+import {
+  cancelSalesOrderAction,
+  confirmQuoteAction,
+  createQuoteAction,
+  declineQuoteAction,
+  issueQuoteAction,
+  reReserveOrderAction,
+  releaseOrderStockAction,
+} from "@/app/actions/sales";
 import { Badge } from "../ui";
 import { ActionForm, type BatchOption, QuoteFields, Submit } from "../action-form";
 
@@ -21,6 +30,17 @@ function Margin({ qty, price, cost }: { qty: unknown; price: unknown; cost: unkn
   );
 }
 
+// A reason-required order action (release / cancel), same shape as Decline.
+function WithReason({ action, soId, label }: { action: typeof cancelSalesOrderAction; soId: string; label: string }) {
+  return (
+    <ActionForm action={action}>
+      <input type="hidden" name="soId" value={soId} />
+      <input name="reason" required placeholder="Reason" className={`${small} w-24`} />
+      <Submit tone="ghost">{label}</Submit>
+    </ActionForm>
+  );
+}
+
 function Decline({ quoteId }: { quoteId: string }) {
   return (
     <ActionForm action={declineQuoteAction}>
@@ -34,6 +54,8 @@ function Decline({ quoteId }: { quoteId: string }) {
 export default async function TradeDesk({ searchParams }: PageProps<"/console/trade-desk">) {
   const { batch: preselect } = await searchParams;
   const now = new Date();
+  // Lapsed holds give their stock back before the desk reads availability.
+  await expireReservations();
 
   const [requests, open, orders, buyers, batches] = await Promise.all([
     prisma.quote.findMany({
@@ -49,7 +71,11 @@ export default async function TradeDesk({ searchParams }: PageProps<"/console/tr
     prisma.salesOrder.findMany({
       orderBy: { createdAt: "desc" },
       take: 50,
-      include: { buyer: { include: { organization: { select: { name: true } } } }, batch: { select: { batchNumber: true } } },
+      include: {
+        buyer: { include: { organization: { select: { name: true } } } },
+        batch: { select: { batchNumber: true } },
+        reservations: { where: { status: "ACTIVE" }, select: { expiresAt: true } },
+      },
     }),
     prisma.buyer.findMany({
       where: { kycStatus: "APPROVED" },
@@ -212,6 +238,7 @@ export default async function TradeDesk({ searchParams }: PageProps<"/console/tr
                 ))}
                 <th className={`${th} text-right`}>Price</th>
                 <th className={th}>Status</th>
+                <th className={th}>Action</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-divider">
@@ -227,11 +254,28 @@ export default async function TradeDesk({ searchParams }: PageProps<"/console/tr
                     <td key={i} className="whitespace-nowrap px-4 py-2 text-right tabular-nums">{fmtTonnes(v)}</td>
                   ))}
                   <td className="whitespace-nowrap px-4 py-2 text-right">{fmtPricePerT(so.unitPrice)}</td>
-                  <td className="px-4 py-2"><Badge>{so.status}</Badge></td>
+                  <td className="whitespace-nowrap px-4 py-2">
+                    <Badge>{so.status}</Badge>
+                    {so.reservations[0]?.expiresAt && (
+                      <div className="text-xs text-muted">held to {fmtDate(so.reservations[0].expiresAt).slice(0, 10)}</div>
+                    )}
+                  </td>
+                  <td className="px-4 py-2"><div className="flex flex-col gap-2">
+                    {so.status === "CONFIRMED" && (
+                      <ActionForm action={reReserveOrderAction} success="Stock reserved.">
+                        <input type="hidden" name="soId" value={so.id} />
+                        <Submit>Re-reserve</Submit>
+                      </ActionForm>
+                    )}
+                    {so.status === "RESERVED" && <WithReason action={releaseOrderStockAction} soId={so.id} label="Release stock" />}
+                    {(so.status === "CONFIRMED" || so.status === "RESERVED") && (
+                      <WithReason action={cancelSalesOrderAction} soId={so.id} label="Cancel order" />
+                    )}
+                  </div></td>
                 </tr>
               ))}
               {orders.length === 0 && (
-                <tr><td colSpan={11} className="px-4 py-6 text-center text-muted">No sales orders yet.</td></tr>
+                <tr><td colSpan={12} className="px-4 py-6 text-center text-muted">No sales orders yet.</td></tr>
               )}
             </tbody>
           </table>
