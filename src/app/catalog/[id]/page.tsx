@@ -2,7 +2,10 @@ import Link from "next/link";
 import { notFound } from "next/navigation";
 import { prisma } from "@/lib/prisma";
 import { COMMODITY, batchValue, commodityLabel, fmtGrade, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
+import { auth0, isAuthConfigured } from "@/lib/auth0";
+import { isStaff, sessionRole } from "@/lib/auth";
 import { MineralShowcase } from "../mineral-showcase";
+import { QuoteRequest } from "../quote-request";
 
 export const dynamic = "force-dynamic"; // live facts from the transactional API (FR-85)
 
@@ -23,6 +26,10 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
     },
   });
   if (!batch || batch.status !== "SELLABLE") notFound();
+
+  const session = isAuthConfigured ? await auth0.getSession() : null;
+  const role = sessionRole(session?.user);
+  const viewer = role === "BUYER" ? "buyer" : role && isStaff(role) ? "staff" : "anon";
 
   const available = Number(batch.availableQuantity);
   const del = batch.sourceDelivery;
@@ -83,13 +90,7 @@ export default async function BatchDetail({ params }: { params: Promise<{ id: st
             ))}
           </dl>
 
-          <button
-            disabled
-            title="Reservation runs through the Trade Desk once authentication is wired."
-            className="mt-4 min-h-12 w-full cursor-not-allowed rounded-xl bg-accent px-5 text-[15px] font-bold text-white opacity-50"
-          >
-            Request quote — via Trade Desk
-          </button>
+          <QuoteRequest viewer={viewer} batchId={batch.id} batchNumber={batch.batchNumber} available={available} />
         </div>
       </div>
 
