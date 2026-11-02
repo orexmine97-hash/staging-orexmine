@@ -54,6 +54,19 @@ function reservationRef(): string {
  * transaction, so the buckets and the ledger never diverge.
  */
 export async function reserveBatch(input: ReserveInput, actor: Actor) {
+  return prisma.$transaction((tx) => reserveInTx(tx, input, actor), RESERVE_TX_OPTS);
+}
+
+// A contended reservation blocks on the batch row lock; the waiter must
+// outlast the holder rather than abort with Prisma's 5s default timeout.
+// ponytail: 15s ceiling; revisit if reservation throughput ever demands it.
+export const RESERVE_TX_OPTS = { timeout: 15_000, maxWait: 10_000 };
+
+/**
+ * The reservation itself, inside a caller's transaction — so a sales-order
+ * confirmation can create the SO and reserve its stock all-or-nothing.
+ */
+export async function reserveInTx(tx: Prisma.TransactionClient, input: ReserveInput, actor: Actor) {
   const qty = new Prisma.Decimal(input.quantity);
   if (qty.lte(0)) {
     throw new ReservationError("INVALID_QUANTITY", "Reservation quantity must be positive.");
@@ -61,82 +74,72 @@ export async function reserveBatch(input: ReserveInput, actor: Actor) {
   const expiresAt =
     input.expiresAt ?? new Date(Date.now() + RESERVATION_TTL_HOURS * 3_600_000);
 
-  return prisma.$transaction(async (tx) => {
-    const updated = await tx.inventoryBatch.updateMany({
-      where: { id: input.batchId, status: "SELLABLE", availableQuantity: { gte: qty } },
-      data: {
-        availableQuantity: { decrement: qty },
-        reservedQuantity: { increment: qty },
-      },
-    });
-
-    if (updated.count === 0) {
-      // Nothing changed — say precisely why.
-      const b = await tx.inventoryBatch.findUnique({
-        where: { id: input.batchId },
-        select: { status: true, availableQuantity: true },
-      });
-      if (!b) throw new ReservationError("BATCH_NOT_FOUND");
-      if (b.status !== "SELLABLE") {
-        throw new ReservationError("NOT_SELLABLE", `Batch is ${b.status}, not sellable.`);
-      }
-      throw new ReservationError(
-        "INSUFFICIENT_AVAILABLE",
-        `Only ${b.availableQuantity} available; requested ${qty}. Reserving would double-sell.`,
-      );
-    }
-
-    const reservation = await tx.reservation.create({
-      data: {
-        reference: reservationRef(),
-        batchId: input.batchId,
-        salesOrderId: input.salesOrderId,
-        status: "ACTIVE",
-        quantity: qty,
-        expiresAt,
-        createdById: actor.id,
-      },
-    });
-
-    await tx.stockMovement.create({
-      data: {
-        batchId: input.batchId,
-        type: "RESERVE",
-        quantity: qty,
-        reason: input.reason ?? "Reservation created",
-        refType: "Reservation",
-        refId: reservation.id,
-        actorId: actor.id,
-        actorName: actor.name,
-      },
-    });
-
-    const after = await tx.inventoryBatch.findUniqueOrThrow({
-      where: { id: input.batchId },
-      select: { availableQuantity: true, reservedQuantity: true },
-    });
-    await tx.auditEvent.create({
-      data: {
-        actorId: actor.id,
-        actorName: actor.name,
-        actorRole: actor.role,
-        action: "Reservation created",
-        recordType: "Reservation",
-        recordId: reservation.reference,
-        before: `available ${after.availableQuantity.add(qty)}`,
-        after: `available ${after.availableQuantity} · reserved ${after.reservedQuantity}`,
-        reason: input.reason ?? "Reservation created",
-      },
-    });
-
-    return reservation;
-    // ponytail: SO.reservedQuantity roll-up is left to the sales-order flow —
-    // add here (one increment) when that slice lands.
-  }, {
-    // A contended reservation blocks on the batch row lock; the waiter must
-    // outlast the holder rather than abort with Prisma's 5s default timeout.
-    // ponytail: 15s ceiling; revisit if reservation throughput ever demands it.
-    timeout: 15_000,
-    maxWait: 10_000,
+  const updated = await tx.inventoryBatch.updateMany({
+    where: { id: input.batchId, status: "SELLABLE", availableQuantity: { gte: qty } },
+    data: {
+      availableQuantity: { decrement: qty },
+      reservedQuantity: { increment: qty },
+    },
   });
+
+  if (updated.count === 0) {
+    // Nothing changed — say precisely why.
+    const b = await tx.inventoryBatch.findUnique({
+      where: { id: input.batchId },
+      select: { status: true, availableQuantity: true },
+    });
+    if (!b) throw new ReservationError("BATCH_NOT_FOUND");
+    if (b.status !== "SELLABLE") {
+      throw new ReservationError("NOT_SELLABLE", `Batch is ${b.status}, not sellable.`);
+    }
+    throw new ReservationError(
+      "INSUFFICIENT_AVAILABLE",
+      `Only ${b.availableQuantity} available; requested ${qty}. Reserving would double-sell.`,
+    );
+  }
+
+  const reservation = await tx.reservation.create({
+    data: {
+      reference: reservationRef(),
+      batchId: input.batchId,
+      salesOrderId: input.salesOrderId,
+      status: "ACTIVE",
+      quantity: qty,
+      expiresAt,
+      createdById: actor.id,
+    },
+  });
+
+  await tx.stockMovement.create({
+    data: {
+      batchId: input.batchId,
+      type: "RESERVE",
+      quantity: qty,
+      reason: input.reason ?? "Reservation created",
+      refType: "Reservation",
+      refId: reservation.id,
+      actorId: actor.id,
+      actorName: actor.name,
+    },
+  });
+
+  const after = await tx.inventoryBatch.findUniqueOrThrow({
+    where: { id: input.batchId },
+    select: { availableQuantity: true, reservedQuantity: true },
+  });
+  await tx.auditEvent.create({
+    data: {
+      actorId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: "Reservation created",
+      recordType: "Reservation",
+      recordId: reservation.reference,
+      before: `available ${after.availableQuantity.add(qty)}`,
+      after: `available ${after.availableQuantity} · reserved ${after.reservedQuantity}`,
+      reason: input.reason ?? "Reservation created",
+    },
+  });
+
+  return reservation;
 }

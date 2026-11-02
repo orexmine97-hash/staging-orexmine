@@ -32,7 +32,7 @@ const TX_OPTS = { timeout: 15_000, maxWait: 10_000 };
 
 type Tx = Prisma.TransactionClient;
 
-function ref(prefix: string): string {
+export function ref(prefix: string): string {
   // ponytail: unique but not human-sequential — a shared ref-sequence generator
   // is a cross-cutting concern; add readable running numbers when the console needs them.
   return `${prefix}-${Date.now().toString(36).toUpperCase()}-${Math.random().toString(36).slice(2, 5).toUpperCase()}`;
@@ -45,7 +45,7 @@ function batchNumber(commodity: string): string {
   return `OX-${c}-${yymm}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
 }
 
-function audit(
+export function audit(
   tx: Tx,
   actor: Actor,
   action: string,

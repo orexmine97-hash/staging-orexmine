@@ -1,31 +1,100 @@
 import Link from "next/link";
-import { ShieldCheck } from "lucide-react";
+import { Check, ShieldCheck } from "lucide-react";
 import { prisma } from "@/lib/prisma";
 import { COMMODITY, batchValue, commodityLabel, fmtGrade, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
 
 export const dynamic = "force-dynamic"; // live inventory (FR-85)
 
+type Batch = Awaited<ReturnType<typeof prisma.inventoryBatch.findMany>>[number];
+
+// Grade thresholds only make sense within one mineral (units differ).
+const GRADE_STEPS: Record<string, number[]> = { gold: [80, 84], tin: [70], coltan: [40], leadzinc: [50] };
+const QTY_STEPS = [40, 90];
+
+const SORTS: [string, string, (a: Batch, b: Batch) => number][] = [
+  ["grade", "Highest grade", (a, b) => Number(b.grade) - Number(a.grade)],
+  ["qty", "Most available", (a, b) => Number(b.availableQuantity) - Number(a.availableQuantity)],
+  ["priceUp", "Price low–high", (a, b) => Number(a.unitPrice) - Number(b.unitPrice)],
+  ["price", "Price high–low", (a, b) => Number(b.unitPrice) - Number(a.unitPrice)],
+];
+
+// "Lagos FZ · Bay 4" → "Lagos FZ"
+const site = (location: string) => location.split(" · ")[0];
+
+function Chip({ href, on, children }: { href: string; on: boolean; children: React.ReactNode }) {
+  return (
+    <Link
+      href={href}
+      scroll={false}
+      aria-current={on ? "true" : undefined}
+      className={`inline-flex min-h-10 items-center whitespace-nowrap rounded-full border px-3.5 text-sm font-semibold ${
+        on ? "border-ink bg-ink text-[#f4f6f2]" : "border-transparent bg-[#f1f3f6] text-[#2c3a35] hover:border-ink/25"
+      }`}
+    >
+      {children}
+    </Link>
+  );
+}
+
+function Group({ legend, hint, children }: { legend: string; hint?: string; children: React.ReactNode }) {
+  return (
+    <fieldset className="m-0 border-0 p-0">
+      <legend className="mb-2.5 p-0 font-heading text-sm font-semibold">{legend}</legend>
+      {hint && <p className="-mt-0.5 mb-2.5 text-[13px] text-muted">{hint}</p>}
+      <div className="flex flex-wrap gap-2">{children}</div>
+    </fieldset>
+  );
+}
+
 export default async function CatalogPage({ searchParams }: PageProps<"/catalog">) {
-  const { q } = await searchParams;
-  const query = (typeof q === "string" ? q : "").trim();
+  const sp = await searchParams;
+  const str = (k: string) => (typeof sp[k] === "string" ? (sp[k] as string).trim() : "");
+  const f = {
+    q: str("q"),
+    comm: str("comm"),
+    grade: Number(str("grade")) || 0,
+    qty: Number(str("qty")) || 0,
+    loc: str("loc"),
+    sort: str("sort") || "grade",
+  };
+
+  // Link to the current view with one filter changed. Changing mineral resets
+  // the grade floor, since grade units differ between minerals.
+  const hrefWith = (k: keyof typeof f, v: string | number) => {
+    const next = { ...f, [k]: v, ...(k === "comm" && { grade: 0 }) };
+    const p = new URLSearchParams();
+    for (const [key, val] of Object.entries(next)) {
+      if (val && !(key === "sort" && val === "grade")) p.set(key, String(val));
+    }
+    const qs = p.toString();
+    return qs ? `/catalog?${qs}` : "/catalog";
+  };
 
   // Only QC-passed, sellable batches ever reach the buyer (FR-80).
-  const batches = await prisma.inventoryBatch.findMany({
-    where: {
-      status: "SELLABLE",
-      ...(query && {
-        OR: [
-          { batchNumber: { contains: query, mode: "insensitive" } },
-          { commodity: { contains: query, mode: "insensitive" } },
-          { location: { contains: query, mode: "insensitive" } },
-        ],
-      }),
-    },
-    orderBy: [{ commodity: "asc" }, { grade: "desc" }],
-  });
+  const [all, heldBack] = await Promise.all([
+    prisma.inventoryBatch.findMany({ where: { status: "SELLABLE" } }),
+    prisma.inventoryBatch.count({ where: { status: "QC_HOLD" } }),
+  ]);
 
+  // ponytail: filter/sort in memory — the pilot register is tens of batches.
+  // Move into the Prisma where/orderBy if it grows into the thousands.
+  const ql = f.q.toLowerCase();
+  const sorter = (SORTS.find(([k]) => k === f.sort) ?? SORTS[0])[2];
+  const batches = all
+    .filter(
+      (b) =>
+        (!f.comm || b.commodity === f.comm) &&
+        Number(b.grade) >= f.grade &&
+        Number(b.availableQuantity) >= f.qty &&
+        (!f.loc || site(b.location) === f.loc) &&
+        (!ql || `${b.batchNumber} ${b.commodity} ${commodityLabel(b.commodity)} ${b.location}`.toLowerCase().includes(ql)),
+    )
+    .sort(sorter);
+
+  const sites = [...new Set(all.map((b) => site(b.location)))].sort();
+  const gradeUnit = all.find((b) => b.commodity === f.comm)?.gradeUnit ?? "";
+  const activeFilters = [f.q, f.comm, f.grade, f.qty, f.loc].filter(Boolean).length;
   const totalAvail = batches.reduce((a, b) => a + Number(b.availableQuantity), 0);
-  const minerals = new Set(batches.map((b) => b.commodity)).size;
 
   return (
     <main className="mx-auto max-w-[1280px] px-[clamp(16px,3vw,40px)] pb-24 pt-10">
@@ -39,14 +108,15 @@ export default async function CatalogPage({ searchParams }: PageProps<"/catalog"
             Inventory
           </h1>
           <p className="m-0 max-w-[56ch] text-muted">
-            Only QC-passed, sellable stock is listed. Batches on QC hold or that failed assay are never shown.
+            Only QC-passed, sellable stock is listed.
+            {heldBack > 0 && ` ${heldBack} ${heldBack === 1 ? "batch" : "batches"} on QC hold ${heldBack === 1 ? "is" : "are"} not shown.`}
           </p>
         </div>
         <dl className="m-0 flex overflow-hidden rounded-2xl bg-surface">
           {[
-            ["Sellable", fmtTonnes(totalAvail)],
-            ["Batches", String(batches.length)],
-            ["Minerals", String(minerals)],
+            ["Sellable", fmtTonnes(all.reduce((a, b) => a + Number(b.availableQuantity), 0))],
+            ["Batches", String(all.length)],
+            ["Minerals", String(new Set(all.map((b) => b.commodity)).size)],
           ].map(([k, v]) => (
             <div key={k} className="border-r border-divider px-[22px] py-3.5 last:border-r-0">
               <dt className="text-[13px] text-muted">{k}</dt>
@@ -56,117 +126,156 @@ export default async function CatalogPage({ searchParams }: PageProps<"/catalog"
         </dl>
       </section>
 
-      <div className="mb-[18px] mt-10 flex flex-wrap items-center justify-between gap-3">
-        <p role="status" className="m-0 font-heading text-[17px] font-semibold">
-          {batches.length} sellable {batches.length === 1 ? "batch" : "batches"}
-          {query && (
-            <>
-              {" "}matching &ldquo;{query}&rdquo;{" "}
-              <Link href="/catalog" className="text-sm font-bold text-accent hover:underline">Clear</Link>
-            </>
+      <div className="mt-10 flex flex-col gap-6 lg:flex-row lg:items-start">
+        {/* ponytail: stacks above the grid on mobile; a collapsible drawer can come later. */}
+        <aside aria-label="Filters" className="flex flex-col gap-6 rounded-3xl bg-surface p-6 lg:sticky lg:top-6 lg:w-[280px] lg:shrink-0">
+          {f.q && (
+            <Group legend="Search">
+              <Chip href={hrefWith("q", "")} on>&ldquo;{f.q}&rdquo; ✕</Chip>
+            </Group>
           )}
-        </p>
-        {/* Mineral chips → the same server-side ?q= filter as the header search. */}
-        <nav aria-label="Mineral" className="flex flex-wrap gap-2">
-          {[["All", ""], ...Object.entries(COMMODITY).map(([k, c]) => [c.short, k])].map(([label, key]) => {
-            const on = query === key;
-            return (
-              <Link
-                key={label}
-                href={key ? `/catalog?q=${key}` : "/catalog"}
-                aria-current={on ? "true" : undefined}
-                className={`inline-flex min-h-10 items-center rounded-full border px-4 text-sm font-semibold ${
-                  on ? "border-ink bg-ink text-[#f4f6f2]" : "border-divider bg-surface hover:border-ink/40"
-                }`}
-              >
-                {label}
-              </Link>
-            );
-          })}
-        </nav>
+          <Group legend="Mineral">
+            <Chip href={hrefWith("comm", "")} on={!f.comm}>All minerals</Chip>
+            {Object.entries(COMMODITY).map(([k, c]) => (
+              <Chip key={k} href={hrefWith("comm", k)} on={f.comm === k}>{c.short}</Chip>
+            ))}
+          </Group>
+          <Group legend="Minimum grade" hint={f.comm ? undefined : "Grades use different units, so pick a mineral first."}>
+            <Chip href={hrefWith("grade", 0)} on={!f.grade}>Any</Chip>
+            {(GRADE_STEPS[f.comm] ?? []).map((v) => (
+              <Chip key={v} href={hrefWith("grade", v)} on={f.grade === v}>{v} {gradeUnit}+</Chip>
+            ))}
+          </Group>
+          <Group legend="Minimum available">
+            <Chip href={hrefWith("qty", 0)} on={!f.qty}>Any</Chip>
+            {QTY_STEPS.map((v) => (
+              <Chip key={v} href={hrefWith("qty", v)} on={f.qty === v}>{v} t+</Chip>
+            ))}
+          </Group>
+          <Group legend="Location">
+            <Chip href={hrefWith("loc", "")} on={!f.loc}>All</Chip>
+            {sites.map((s) => (
+              <Chip key={s} href={hrefWith("loc", s)} on={f.loc === s}>{s}</Chip>
+            ))}
+          </Group>
+          <div className="flex flex-col gap-2 border-t border-divider pt-[18px]">
+            <span className="font-heading text-sm font-semibold">Status</span>
+            <span className="flex items-center gap-2.5 text-[15px] font-semibold">
+              <span className="grid size-6 place-items-center rounded-full bg-[#d9e6de] text-[#245a4a]">
+                <Check size={14} strokeWidth={2.5} aria-hidden="true" />
+              </span>
+              Sellable only
+            </span>
+            <span className="text-[13px] text-muted">Batches on QC hold or that failed assay are never listed.</span>
+          </div>
+          {activeFilters > 0 && (
+            <Link
+              href={f.sort === "grade" ? "/catalog" : `/catalog?sort=${f.sort}`}
+              scroll={false}
+              className="inline-flex min-h-11 items-center justify-center rounded-xl border border-divider text-sm font-bold hover:border-ink/40"
+            >
+              Clear filters ({activeFilters})
+            </Link>
+          )}
+        </aside>
+
+        <div className="flex min-w-0 flex-1 flex-col gap-[18px]">
+          <div className="flex flex-wrap items-center justify-between gap-x-5 gap-y-3">
+            <p role="status" className="m-0 font-heading text-[17px] font-semibold">
+              {batches.length} {batches.length === 1 ? "batch" : "batches"} · {fmtTonnes(totalAvail)} available
+            </p>
+            <nav aria-label="Sort" className="flex max-w-full items-center gap-1.5 overflow-x-auto">
+              <span className="mr-1 shrink-0 text-sm text-muted">Sort</span>
+              {SORTS.map(([k, label]) => (
+                <Chip key={k} href={hrefWith("sort", k)} on={f.sort === k}>{label}</Chip>
+              ))}
+            </nav>
+          </div>
+
+          {batches.length === 0 && (
+            <div className="rounded-3xl bg-surface p-10 text-center text-sm text-muted">
+              No sellable batches match these filters.{" "}
+              <Link href="/catalog" className="font-bold text-accent hover:underline">Clear filters</Link>
+            </div>
+          )}
+
+          <ul className="m-0 grid list-none grid-cols-[repeat(auto-fill,minmax(min(264px,100%),1fr))] gap-4 p-0">
+            {batches.map((b) => {
+              const available = Number(b.availableQuantity);
+              const quantity = Number(b.quantity);
+              const pct = quantity > 0 ? Math.round((available / quantity) * 100) : 0;
+              const href = `/catalog/${b.batchNumber}`;
+              return (
+                <li key={b.id}>
+                  <article className="flex h-full flex-col overflow-hidden rounded-3xl bg-surface">
+                    <Link
+                      href={href}
+                      className="relative block aspect-[4/3] overflow-hidden"
+                      style={{ background: "radial-gradient(100% 80% at 50% 35%, #fbfaf6 0%, #e4e8e2 78%)" }}
+                    >
+                      {COMMODITY[b.commodity] && (
+                        // eslint-disable-next-line @next/next/no-img-element -- static illustration
+                        <img
+                          src={COMMODITY[b.commodity].img}
+                          alt={`Illustration of ${commodityLabel(b.commodity).toLowerCase()}`}
+                          className="absolute left-1/2 top-1/2 w-[78%] -translate-x-1/2 -translate-y-1/2"
+                        />
+                      )}
+                      {pct <= 25 && (
+                        <span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-surface/90 px-2.5 py-1 text-[13px] font-bold">
+                          <span aria-hidden="true" className="size-[7px] rounded-full bg-accent" />
+                          Low stock
+                        </span>
+                      )}
+                      <span className="absolute bottom-3 right-3 rounded-full bg-[#d9e6de] px-2.5 py-0.5 text-[13px] font-bold text-[#245a4a]">
+                        QC passed
+                      </span>
+                    </Link>
+                    <div className="flex flex-1 flex-col gap-3.5 px-5 pb-5 pt-[18px]">
+                      <div>
+                        <h2 className="m-0 font-heading text-lg font-semibold tracking-[-0.01em]">{commodityLabel(b.commodity)}</h2>
+                        <p className="m-0 mt-0.5 text-[13px] tabular-nums text-muted">{b.batchNumber} · {b.location}</p>
+                      </div>
+                      <div>
+                        <div className="flex items-baseline gap-1 whitespace-nowrap">
+                          <span className="font-heading text-[30px] font-semibold leading-none tabular-nums tracking-[-0.02em]">{fmtGrade(b.grade, "")}</span>
+                          <span className="text-[15px] font-semibold text-muted">{b.gradeUnit}</span>
+                        </div>
+                        <p className="m-0 mt-1 text-[13px] text-muted">Assayed grade</p>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <div className="flex justify-between text-sm tabular-nums">
+                          <span><b className="font-bold">{fmtTonnes(available)}</b> available</span>
+                          <span className="text-muted">of {fmtTonnes(quantity)}</span>
+                        </div>
+                        <div aria-hidden="true" className="h-1.5 overflow-hidden rounded-full bg-soft">
+                          <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
+                        </div>
+                      </div>
+                      <div className="flex justify-between gap-3 border-t border-divider pt-3.5">
+                        <div>
+                          <div className="text-[13px] text-muted">Indicative ask</div>
+                          <div className="text-[15px] font-bold">{fmtPricePerT(b.unitPrice)}</div>
+                        </div>
+                        <div className="text-right">
+                          <div className="text-[13px] text-muted">Lot value</div>
+                          <div className="text-[15px] font-bold">{fmtMoney(batchValue(available, b.unitPrice))}</div>
+                        </div>
+                      </div>
+                      <Link
+                        href={href}
+                        className="mt-auto inline-flex min-h-11 items-center justify-center rounded-xl bg-ink text-sm font-bold text-[#f4f6f2] hover:opacity-90"
+                      >
+                        View batch
+                      </Link>
+                    </div>
+                  </article>
+                </li>
+              );
+            })}
+          </ul>
+        </div>
       </div>
-
-      {batches.length === 0 && (
-        <p className="rounded-3xl bg-surface p-10 text-center text-sm text-muted">
-          No sellable batches{query ? <> match &ldquo;{query}&rdquo;</> : ""}.
-        </p>
-      )}
-
-      <ul className="m-0 grid list-none grid-cols-[repeat(auto-fill,minmax(min(264px,100%),1fr))] gap-4 p-0">
-        {batches.map((b) => {
-          const available = Number(b.availableQuantity);
-          const quantity = Number(b.quantity);
-          const pct = quantity > 0 ? Math.round((available / quantity) * 100) : 0;
-          const href = `/catalog/${b.batchNumber}`;
-          return (
-            <li key={b.id}>
-              <article className="flex h-full flex-col overflow-hidden rounded-3xl bg-surface">
-                <Link
-                  href={href}
-                  className="relative block aspect-[4/3] overflow-hidden"
-                  style={{ background: "radial-gradient(100% 80% at 50% 35%, #fbfaf6 0%, #e4e8e2 78%)" }}
-                >
-                  {COMMODITY[b.commodity] && (
-                    // eslint-disable-next-line @next/next/no-img-element -- static illustration
-                    <img
-                      src={COMMODITY[b.commodity].img}
-                      alt={`Illustration of ${commodityLabel(b.commodity).toLowerCase()}`}
-                      className="absolute left-1/2 top-1/2 w-[78%] -translate-x-1/2 -translate-y-1/2"
-                    />
-                  )}
-                  {pct <= 25 && (
-                    <span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-full bg-surface/90 px-2.5 py-1 text-[13px] font-bold">
-                      <span aria-hidden="true" className="size-[7px] rounded-full bg-accent" />
-                      Low stock
-                    </span>
-                  )}
-                  <span className="absolute bottom-3 right-3 rounded-full bg-[#d9e6de] px-2.5 py-0.5 text-[13px] font-bold text-[#245a4a]">
-                    QC passed
-                  </span>
-                </Link>
-                <div className="flex flex-1 flex-col gap-3.5 px-5 pb-5 pt-[18px]">
-                  <div>
-                    <h2 className="m-0 font-heading text-lg font-semibold tracking-[-0.01em]">{commodityLabel(b.commodity)}</h2>
-                    <p className="m-0 mt-0.5 text-[13px] tabular-nums text-muted">{b.batchNumber} · {b.location}</p>
-                  </div>
-                  <div>
-                    <div className="flex items-baseline gap-1 whitespace-nowrap">
-                      <span className="font-heading text-[30px] font-semibold leading-none tabular-nums tracking-[-0.02em]">{fmtGrade(b.grade, "")}</span>
-                      <span className="text-[15px] font-semibold text-muted">{b.gradeUnit}</span>
-                    </div>
-                    <p className="m-0 mt-1 text-[13px] text-muted">Assayed grade</p>
-                  </div>
-                  <div className="flex flex-col gap-1.5">
-                    <div className="flex justify-between text-sm tabular-nums">
-                      <span><b className="font-bold">{fmtTonnes(available)}</b> available</span>
-                      <span className="text-muted">of {fmtTonnes(quantity)}</span>
-                    </div>
-                    <div aria-hidden="true" className="h-1.5 overflow-hidden rounded-full bg-soft">
-                      <div className="h-full rounded-full bg-accent" style={{ width: `${pct}%` }} />
-                    </div>
-                  </div>
-                  <div className="flex justify-between gap-3 border-t border-divider pt-3.5">
-                    <div>
-                      <div className="text-[13px] text-muted">Indicative ask</div>
-                      <div className="text-[15px] font-bold">{fmtPricePerT(b.unitPrice)}</div>
-                    </div>
-                    <div className="text-right">
-                      <div className="text-[13px] text-muted">Lot value</div>
-                      <div className="text-[15px] font-bold">{fmtMoney(batchValue(available, b.unitPrice))}</div>
-                    </div>
-                  </div>
-                  <Link
-                    href={href}
-                    className="mt-auto inline-flex min-h-11 items-center justify-center rounded-xl bg-ink text-sm font-bold text-[#f4f6f2] hover:opacity-90"
-                  >
-                    View batch
-                  </Link>
-                </div>
-              </article>
-            </li>
-          );
-        })}
-      </ul>
     </main>
   );
 }
