@@ -8,10 +8,13 @@ import { ReservationError } from "@/lib/reservations";
 import {
   SalesError,
   type QuoteTerms,
+  cancelSalesOrder,
   confirmQuote,
   createQuote,
   declineQuote,
   issueQuote,
+  reReserveOrder,
+  releaseOrderStock,
   requestQuote,
   setBuyerKyc,
 } from "@/lib/sales";
@@ -121,6 +124,43 @@ export async function confirmQuoteAction(formData: FormData): Promise<ActionResu
     const so = await confirmQuote(quoteId, actor);
     refreshSales();
     return { ok: true, reference: so.reference };
+  } catch (e) {
+    return toFailure(e);
+  }
+}
+
+// Order exceptions (FR-40): release held stock, re-hold it, or cancel.
+export async function releaseOrderStockAction(formData: FormData): Promise<ActionResult<object>> {
+  const soId = str(formData, "soId");
+  try {
+    const actor = await authorizeFor({ action: "order.release", recordType: "SalesOrder", recordId: soId }, "SALES", "ADMIN");
+    await releaseOrderStock(soId, str(formData, "reason"), actor);
+    refreshSales();
+    return { ok: true };
+  } catch (e) {
+    return toFailure(e);
+  }
+}
+
+export async function reReserveOrderAction(formData: FormData): Promise<ActionResult<object>> {
+  const soId = str(formData, "soId");
+  try {
+    const actor = await authorizeFor({ action: "order.reserve", recordType: "SalesOrder", recordId: soId }, "SALES", "ADMIN");
+    await reReserveOrder(soId, actor);
+    refreshSales();
+    return { ok: true };
+  } catch (e) {
+    return toFailure(e);
+  }
+}
+
+export async function cancelSalesOrderAction(formData: FormData): Promise<ActionResult<object>> {
+  const soId = str(formData, "soId");
+  try {
+    const actor = await authorizeFor({ action: "order.cancel", recordType: "SalesOrder", recordId: soId }, "SALES", "ADMIN");
+    await cancelSalesOrder(soId, str(formData, "reason"), actor);
+    refreshSales();
+    return { ok: true };
   } catch (e) {
     return toFailure(e);
   }

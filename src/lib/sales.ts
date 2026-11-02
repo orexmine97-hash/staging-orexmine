@@ -1,7 +1,7 @@
 import { Prisma, type KycStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { audit, ref } from "@/lib/procurement";
-import { type Actor, RESERVE_TX_OPTS, reserveInTx } from "@/lib/reservations";
+import { type Actor, RESERVE_TX_OPTS, expireInTx, releaseInTx, reserveInTx } from "@/lib/reservations";
 
 export type SalesErrorCode =
   | "INVALID_QUANTITY"
@@ -13,6 +13,7 @@ export type SalesErrorCode =
   | "NOT_SELLABLE"
   | "INSUFFICIENT_AVAILABLE"
   | "QUOTE_NOT_FOUND"
+  | "ORDER_NOT_FOUND"
   | "QUOTE_EXPIRED"
   | "INVALID_STATE"
   | "REASON_REQUIRED";
@@ -53,6 +54,7 @@ function assertApproved(buyer: { reference: string; kycStatus: KycStatus }) {
 // Soft pre-check for a friendlier error; the reservation at confirmation is the
 // real double-sell guard.
 async function sellableBatch(tx: Prisma.TransactionClient, batchId: string, qty: Prisma.Decimal) {
+  await expireInTx(tx, batchId); // stock behind a lapsed hold is quotable
   const batch = await tx.inventoryBatch.findUnique({ where: { id: batchId } });
   if (!batch) throw new SalesError("BATCH_NOT_FOUND");
   if (batch.status !== "SELLABLE") throw new SalesError("NOT_SELLABLE", `${batch.batchNumber} is ${batch.status}, not sellable.`);
@@ -249,6 +251,60 @@ export async function confirmQuote(quoteId: string, actor: Actor) {
     );
     await audit(tx, actor, "Sales order confirmed", "SalesOrder", so.reference, `Quote ${quote.reference}`, `Reserved · ${quote.quantity} t of ${quote.batch.batchNumber}`);
     return so;
+  }, RESERVE_TX_OPTS);
+}
+
+// ── Order exceptions (FR-40) ─────────────────────────────────
+async function releaseOrderInTx(tx: Prisma.TransactionClient, soId: string, reason: string, actor: Actor) {
+  const active = await tx.reservation.findMany({ where: { salesOrderId: soId, status: "ACTIVE" }, select: { id: true } });
+  let released = 0;
+  for (const { id } of active) if (await releaseInTx(tx, id, "RELEASED", reason, actor)) released++;
+  return released;
+}
+
+// Manual release: the order stands (back to CONFIRMED) but its stock is freed.
+export async function releaseOrderStock(soId: string, reason: string, actor: Actor) {
+  if (!reason.trim()) throw new SalesError("REASON_REQUIRED", "A reason is required to release reserved stock.");
+  return prisma.$transaction(async (tx) => {
+    const so = await tx.salesOrder.findUnique({ where: { id: soId } });
+    if (!so) throw new SalesError("ORDER_NOT_FOUND");
+    if (so.status !== "RESERVED") throw new SalesError("INVALID_STATE", `${so.reference} is ${so.status}; only a reserved order can release stock.`);
+    if ((await releaseOrderInTx(tx, soId, reason, actor)) === 0) {
+      throw new SalesError("INVALID_STATE", `${so.reference} holds no active reservation; it may have just expired.`);
+    }
+    await audit(tx, actor, "Sales order stock released", "SalesOrder", so.reference, "Reserved", "Confirmed · no stock held", reason);
+  }, RESERVE_TX_OPTS);
+}
+
+// Re-hold stock for a CONFIRMED order whose reservation lapsed or was released.
+export async function reReserveOrder(soId: string, actor: Actor) {
+  return prisma.$transaction(async (tx) => {
+    const so = await tx.salesOrder.findUnique({ where: { id: soId }, include: { buyer: true } });
+    if (!so) throw new SalesError("ORDER_NOT_FOUND");
+    assertApproved(so.buyer);
+    // Conditional flip: two racing re-reserves can't both hold stock.
+    const flipped = await tx.salesOrder.updateMany({ where: { id: soId, status: "CONFIRMED" }, data: { status: "RESERVED" } });
+    if (flipped.count === 0) throw new SalesError("INVALID_STATE", `${so.reference} is ${so.status}; only a confirmed order without stock can be re-reserved.`);
+    const qty = so.orderedQuantity.sub(so.reservedQuantity);
+    await reserveInTx(tx, { batchId: so.batchId, quantity: qty, salesOrderId: so.id, reason: `Re-reserved for ${so.reference}` }, actor);
+    await tx.salesOrder.update({ where: { id: soId }, data: { reservedQuantity: { increment: qty } } });
+    await audit(tx, actor, "Sales order re-reserved", "SalesOrder", so.reference, "Confirmed", `Reserved · ${qty} t`);
+  }, RESERVE_TX_OPTS);
+}
+
+// Cancel before dispatch; any held stock goes back to available.
+export async function cancelSalesOrder(soId: string, reason: string, actor: Actor) {
+  if (!reason.trim()) throw new SalesError("REASON_REQUIRED", "A reason is required to cancel an order.");
+  return prisma.$transaction(async (tx) => {
+    const so = await tx.salesOrder.findUnique({ where: { id: soId } });
+    if (!so) throw new SalesError("ORDER_NOT_FOUND");
+    const flipped = await tx.salesOrder.updateMany({
+      where: { id: soId, status: { in: ["CONFIRMED", "RESERVED"] } },
+      data: { status: "CANCELLED", exceptionNote: reason },
+    });
+    if (flipped.count === 0) throw new SalesError("INVALID_STATE", `${so.reference} is ${so.status}; only an undispatched order can be cancelled.`);
+    await releaseOrderInTx(tx, soId, `Cancelled ${so.reference}: ${reason}`, actor);
+    await audit(tx, actor, "Sales order cancelled", "SalesOrder", so.reference, so.status, "Cancelled", reason);
   }, RESERVE_TX_OPTS);
 }
 

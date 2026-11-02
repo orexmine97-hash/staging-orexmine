@@ -74,6 +74,9 @@ export async function reserveInTx(tx: Prisma.TransactionClient, input: ReserveIn
   const expiresAt =
     input.expiresAt ?? new Date(Date.now() + RESERVATION_TTL_HOURS * 3_600_000);
 
+  // Lapsed holds on this batch give their stock back before we check what's free.
+  await expireInTx(tx, input.batchId);
+
   const updated = await tx.inventoryBatch.updateMany({
     where: { id: input.batchId, status: "SELLABLE", availableQuantity: { gte: qty } },
     data: {
@@ -142,4 +145,102 @@ export async function reserveInTx(tx: Prisma.TransactionClient, input: ReserveIn
   });
 
   return reservation;
+}
+
+// Expiry runs without a signed-in user; audited under this system identity.
+export const SYSTEM_ACTOR: Actor = { id: "system", name: "System (reservation expiry)", role: "ADMIN" };
+
+/**
+ * Give a reservation's stock back to available (FRD §9: expiry, cancellation
+ * and manual release all move stock through an audited RELEASE movement).
+ *
+ * The ACTIVE → RELEASED/EXPIRED flip is conditional, so a reservation is
+ * released at most once even when a sweep and a staff release race. Returns
+ * null when it was no longer active. A linked SO's reserved bucket follows;
+ * a RESERVED order left holding nothing drops back to CONFIRMED so the desk
+ * can re-reserve or cancel it.
+ */
+export async function releaseInTx(
+  tx: Prisma.TransactionClient,
+  reservationId: string,
+  outcome: "RELEASED" | "EXPIRED",
+  reason: string,
+  actor: Actor,
+) {
+  const flipped = await tx.reservation.updateMany({
+    where: { id: reservationId, status: "ACTIVE" },
+    data: { status: outcome, releaseReason: reason },
+  });
+  if (flipped.count === 0) return null;
+  const r = await tx.reservation.findUniqueOrThrow({ where: { id: reservationId } });
+
+  const after = await tx.inventoryBatch.update({
+    where: { id: r.batchId },
+    data: {
+      availableQuantity: { increment: r.quantity },
+      reservedQuantity: { decrement: r.quantity },
+    },
+    select: { availableQuantity: true, reservedQuantity: true },
+  });
+
+  await tx.stockMovement.create({
+    data: {
+      batchId: r.batchId,
+      type: "RELEASE",
+      quantity: r.quantity,
+      reason,
+      refType: "Reservation",
+      refId: r.id,
+      actorId: actor.id,
+      actorName: actor.name,
+    },
+  });
+
+  if (r.salesOrderId) {
+    const so = await tx.salesOrder.update({
+      where: { id: r.salesOrderId },
+      data: { reservedQuantity: { decrement: r.quantity } },
+    });
+    if (so.status === "RESERVED" && so.reservedQuantity.lte(0)) {
+      await tx.salesOrder.update({ where: { id: so.id }, data: { status: "CONFIRMED" } });
+    }
+  }
+
+  await tx.auditEvent.create({
+    data: {
+      actorId: actor.id,
+      actorName: actor.name,
+      actorRole: actor.role,
+      action: outcome === "EXPIRED" ? "Reservation expired" : "Reservation released",
+      recordType: "Reservation",
+      recordId: r.reference,
+      before: `available ${after.availableQuantity.sub(r.quantity)} · reserved ${after.reservedQuantity.add(r.quantity)}`,
+      after: `available ${after.availableQuantity} · reserved ${after.reservedQuantity}`,
+      reason,
+    },
+  });
+
+  return r;
+}
+
+export async function expireInTx(tx: Prisma.TransactionClient, batchId?: string) {
+  const lapsed = await tx.reservation.findMany({
+    where: { status: "ACTIVE", expiresAt: { lt: new Date() }, ...(batchId && { batchId }) },
+    select: { id: true },
+    orderBy: { batchId: "asc" }, // consistent lock order, so two sweeps can't deadlock
+  });
+  for (const { id } of lapsed) {
+    await releaseInTx(tx, id, "EXPIRED", "Reservation expired", SYSTEM_ACTOR);
+  }
+  return lapsed.length;
+}
+
+/**
+ * Release every lapsed reservation. Called lazily (trade desk render, and per
+ * batch before each reservation) so stock never stays stuck behind a dead hold.
+ * ponytail: no scheduler — the catalog can under-report available stock until
+ * the next sweep; add a cron route calling this if that lag ever matters.
+ */
+export function expireReservations() {
+  return prisma.$transaction((tx) => expireInTx(tx), RESERVE_TX_OPTS);
 }
