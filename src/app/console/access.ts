@@ -17,7 +17,7 @@ export const NAV: NavItem[] = [
   { key: "inventory", label: "Inventory", href: "/console/inventory" },
   { key: "buyers", label: "Buyers", href: "/console/buyers" },
   { key: "trade-desk", label: "Trade desk", href: "/console/trade-desk" },
-  { key: "logistics", label: "Logistics", href: null },
+  { key: "logistics", label: "Logistics", href: "/console/logistics" },
   { key: "finance", label: "Finance", href: null },
   { key: "compliance", label: "Compliance", href: null },
   { key: "reports", label: "Reports", href: null },
@@ -67,6 +67,7 @@ const PATH_MODULE: Record<string, string> = {
   inventory: "inventory",
   buyers: "buyers",
   "trade-desk": "trade-desk",
+  logistics: "logistics",
   audit: "audit",
   administration: "administration",
 };

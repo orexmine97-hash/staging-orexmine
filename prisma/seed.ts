@@ -290,7 +290,7 @@ async function main() {
       await prisma.reservation.update({ where: { id: batchResv[o.batch].id }, data: { salesOrderId: so.id } });
     }
     await prisma.shipment.create({
-      data: { reference: o.ship.ref, direction: "OUTBOUND", status: o.ship.status as any, salesOrderId: so.id, carrier: "Dangote Haulage", route: "Lagos FZ → Kaduna", trackingRef: `DH-${o.ship.ref.slice(-4)}`, expectedAt: d("2026-09-28"), podReference: o.ship.pod },
+      data: { reference: o.ship.ref, direction: "OUTBOUND", status: o.ship.status as any, salesOrderId: so.id, carrier: "Dangote Haulage", route: "Lagos FZ → Kaduna", trackingRef: `DH-${o.ship.ref.slice(-4)}`, quantity: dec(o.dispatched), expectedAt: d("2026-09-28"), podReference: o.ship.pod },
     });
     if (o.inv) {
       await prisma.invoice.create({

@@ -532,6 +532,7 @@ model Shipment {
   carrier         String?
   route           String?
   trackingRef     String?
+  quantity        Decimal?          @db.Decimal(18, 6) // outbound: tonnes on this shipment (partial fulfilment)
   expectedAt      DateTime?
   cost            Decimal?          @db.Decimal(18, 2)
   currency        String            @default("NGN")
