@@ -1,4 +1,4 @@
-import { Prisma, type KycStatus } from "@prisma/client";
+import { Prisma, type KycStatus, type SalesOrderStatus } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import { audit, ref } from "@/lib/procurement";
 import { type Actor, RESERVE_TX_OPTS, expireInTx, releaseInTx, reserveInTx } from "@/lib/reservations";
@@ -276,19 +276,44 @@ export async function releaseOrderStock(soId: string, reason: string, actor: Act
   }, RESERVE_TX_OPTS);
 }
 
-// Re-hold stock for a CONFIRMED order whose reservation lapsed or was released.
+// Where an order stands, from its buckets (§6.2 flow). Shared with logistics
+// so dispatch, delivery and returns all agree on the status.
+export function fulfilmentStatus(so: {
+  orderedQuantity: Prisma.Decimal;
+  reservedQuantity: Prisma.Decimal;
+  dispatchedQuantity: Prisma.Decimal;
+  deliveredQuantity: Prisma.Decimal;
+}): SalesOrderStatus {
+  if (so.deliveredQuantity.gte(so.orderedQuantity)) return "DELIVERED";
+  if (so.dispatchedQuantity.gte(so.orderedQuantity)) return "DISPATCHED";
+  if (so.dispatchedQuantity.gt(0)) return "PARTIAL";
+  if (so.reservedQuantity.gt(0)) return "RESERVED";
+  return "CONFIRMED";
+}
+
+// Re-hold the undispatched, unheld remainder of an order whose hold lapsed or
+// was released — before dispatch (CONFIRMED) or part-way through (PARTIAL).
 export async function reReserveOrder(soId: string, actor: Actor) {
   return prisma.$transaction(async (tx) => {
-    const so = await tx.salesOrder.findUnique({ where: { id: soId }, include: { buyer: true } });
-    if (!so) throw new SalesError("ORDER_NOT_FOUND");
+    const target = await tx.salesOrder.findUnique({ where: { id: soId }, select: { batchId: true } });
+    if (!target) throw new SalesError("ORDER_NOT_FOUND");
+    await expireInTx(tx, target.batchId); // a lapsed hold isn't "held" — sweep before sizing the remainder
+    const so = await tx.salesOrder.findUniqueOrThrow({ where: { id: soId }, include: { buyer: true } });
+    const qty = so.orderedQuantity.sub(so.dispatchedQuantity).sub(so.reservedQuantity);
+    if (!(so.status === "CONFIRMED" || so.status === "PARTIAL") || qty.lte(0)) {
+      throw new SalesError("INVALID_STATE", `${so.reference} is ${so.status} with nothing left to reserve.`);
+    }
     assertApproved(so.buyer);
-    // Conditional flip: two racing re-reserves can't both hold stock.
-    const flipped = await tx.salesOrder.updateMany({ where: { id: soId, status: "CONFIRMED" }, data: { status: "RESERVED" } });
-    if (flipped.count === 0) throw new SalesError("INVALID_STATE", `${so.reference} is ${so.status}; only a confirmed order without stock can be re-reserved.`);
-    const qty = so.orderedQuantity.sub(so.reservedQuantity);
+    // Optimistic guard on the reserved bucket: two racing re-reserves can't both hold stock.
+    const moved = await tx.salesOrder.updateMany({
+      where: { id: soId, status: so.status, reservedQuantity: so.reservedQuantity },
+      data: { reservedQuantity: { increment: qty } },
+    });
+    if (moved.count === 0) throw new SalesError("INVALID_STATE", `${so.reference} was changed by someone else; reload and retry.`);
     await reserveInTx(tx, { batchId: so.batchId, quantity: qty, salesOrderId: so.id, reason: `Re-reserved for ${so.reference}` }, actor);
-    await tx.salesOrder.update({ where: { id: soId }, data: { reservedQuantity: { increment: qty } } });
-    await audit(tx, actor, "Sales order re-reserved", "SalesOrder", so.reference, "Confirmed", `Reserved · ${qty} t`);
+    const status = fulfilmentStatus({ ...so, reservedQuantity: so.reservedQuantity.add(qty) });
+    await tx.salesOrder.update({ where: { id: soId }, data: { status } });
+    await audit(tx, actor, "Sales order re-reserved", "SalesOrder", so.reference, so.status, `${status} · +${qty} t held`);
   }, RESERVE_TX_OPTS);
 }
 
