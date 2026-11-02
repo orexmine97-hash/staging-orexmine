@@ -283,7 +283,11 @@ export function fulfilmentStatus(so: {
   reservedQuantity: Prisma.Decimal;
   dispatchedQuantity: Prisma.Decimal;
   deliveredQuantity: Prisma.Decimal;
+  invoicedQuantity?: Prisma.Decimal;
+  paidQuantity?: Prisma.Decimal;
 }): SalesOrderStatus {
+  if (so.paidQuantity?.gte(so.orderedQuantity)) return "PAID";
+  if (so.invoicedQuantity?.gte(so.orderedQuantity)) return "INVOICED";
   if (so.deliveredQuantity.gte(so.orderedQuantity)) return "DELIVERED";
   if (so.dispatchedQuantity.gte(so.orderedQuantity)) return "DISPATCHED";
   if (so.dispatchedQuantity.gt(0)) return "PARTIAL";

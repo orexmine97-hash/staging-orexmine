@@ -294,7 +294,7 @@ async function main() {
     });
     if (o.inv) {
       await prisma.invoice.create({
-        data: { reference: o.inv.ref, salesOrderId: so.id, status: o.inv.status as any, amount: dec(m(o.unit) * o.invoiced), amountPaid: dec(m(o.unit) * o.paid), terms: "30% deposit · 70% on delivery", externalRef: `QB-${o.inv.ref}` },
+        data: { reference: o.inv.ref, salesOrderId: so.id, status: o.inv.status as any, amount: dec(m(o.unit) * o.invoiced), quantity: dec(o.invoiced), amountPaid: dec(m(o.unit) * o.paid), terms: "30% deposit · 70% on delivery", externalRef: `QB-${o.inv.ref}` },
       });
       if (o.paid > 0) {
         await prisma.payment.create({
