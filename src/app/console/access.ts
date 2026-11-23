@@ -32,7 +32,7 @@ export const MODULE_ROLES: Record<string, string[]> = {
   "action-queue": ALL_STAFF,
   suppliers: ["PROCUREMENT"],
   procurement: ["PROCUREMENT"],
-  qc: ["QUALITY_COMPLIANCE"],
+  qc: ["QUALITY_COMPLIANCE", "WAREHOUSE_LOGISTICS"], // warehouse receives; only QC decides
   inventory: ALL_STAFF,
   buyers: ["SALES"],
   "trade-desk": ["SALES"],

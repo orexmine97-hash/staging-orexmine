@@ -1,12 +1,30 @@
 import { prisma } from "@/lib/prisma";
 import { fmtDate, fmtGrade, fmtTonnes } from "@/lib/format";
+import { Prisma } from "@prisma/client";
+import { getSessionActor } from "@/lib/auth";
+import { RECEIVABLE_STATES, outstandingQuantity } from "@/lib/procurement";
+import { receiveDeliveryAction } from "@/app/actions/procurement";
 import { Badge } from "../ui";
+import { ActionForm, Submit } from "../action-form";
 import { QcDecisionForm } from "./qc-form";
+
+const input = "rounded border border-divider bg-bg px-2 py-1 text-xs";
 
 export const dynamic = "force-dynamic";
 
 export default async function QcConsole() {
-  const [holds, decisions] = await Promise.all([
+  const actor = await getSessionActor();
+  const canDecide = actor.role === "QUALITY_COMPLIANCE" || actor.role === "ADMIN";
+  const [openPos, holds, decisions] = await Promise.all([
+    // Accepted POs still owed tonnes — the inbound queue the gate works from (FR-13).
+    prisma.purchaseOrder.findMany({
+      where: { status: { in: RECEIVABLE_STATES } },
+      orderBy: { createdAt: "asc" },
+      include: {
+        miner: { select: { reference: true, organization: { select: { name: true } } } },
+        deliveries: { select: { verifiedQuantity: true, qcDecisions: { select: { decision: true } } } },
+      },
+    }),
     // Batches quarantined pending a QC decision — the queue QC works from.
     prisma.inventoryBatch.findMany({
       where: { status: "QC_HOLD" },
@@ -29,6 +47,44 @@ export default async function QcConsole() {
 
   return (
     <div className="space-y-10">
+      <section>
+        <h2 className="font-heading text-lg font-semibold">Awaiting delivery</h2>
+        <p className="mt-1 text-sm text-muted">
+          Accepted purchase orders with tonnes still outstanding. Record each delivery as it arrives — partial loads keep the PO
+          open — with the weighbridge figure and assay. The batch lands on QC hold.
+        </p>
+        <div className="mt-4 space-y-2">
+          {openPos
+            .map((po) => ({ po, open: outstandingQuantity(po.declaredQuantity, po.deliveries) }))
+            .filter(({ open }) => open.gt(0))
+            .map(({ po, open }) => (
+              <div key={po.id} className="rounded-lg border border-divider bg-surface px-4 py-3">
+                <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm">
+                  <span className="font-medium">{po.reference}</span>
+                  <span className="text-xs text-muted">{po.miner.organization.name} · {po.miner.reference} · {po.commodity}</span>
+                  <Badge>{po.status}</Badge>
+                  <span className="text-xs">Outstanding {fmtTonnes(open)} of {fmtTonnes(po.declaredQuantity)}</span>
+                  {po.declaredGrade != null && <span className="text-xs text-muted">declared {fmtGrade(po.declaredGrade)}</span>}
+                </div>
+                <ActionForm action={receiveDeliveryAction} success="Received" className="mt-2 flex flex-wrap items-center gap-2">
+                  <input type="hidden" name="purchaseOrderId" value={po.id} />
+                  <input name="declaredQuantity" type="number" step="0.001" min="0.001" required defaultValue={Number(Prisma.Decimal.min(open, po.declaredQuantity))} aria-label="Declared on waybill (t)" title="Declared on waybill (t)" className={`${input} w-24`} />
+                  <input name="verifiedQuantity" type="number" step="0.001" min="0.001" required placeholder="Weighbridge t" className={`${input} w-28`} />
+                  <input name="testedGrade" type="number" step="0.01" min="0" max="100" required placeholder="Assay grade %" className={`${input} w-28`} />
+                  <input name="laboratory" placeholder="Laboratory" className={`${input} w-28`} />
+                  <input name="sampleReference" placeholder="Sample ref" className={`${input} w-24`} />
+                  <input name="location" required placeholder="Custody location" defaultValue={po.targetLocation ?? ""} className={`${input} w-32`} />
+                  <input name="reason" placeholder="Waybill / note" className={`${input} w-32`} />
+                  <Submit>Receive</Submit>
+                </ActionForm>
+              </div>
+            ))}
+          {openPos.every((po) => outstandingQuantity(po.declaredQuantity, po.deliveries).lte(0)) && (
+            <p className="text-sm text-muted">No accepted purchase orders awaiting delivery.</p>
+          )}
+        </div>
+      </section>
+
       <section>
         <h2 className="font-heading text-lg font-semibold">Awaiting decision</h2>
         <p className="mt-1 text-sm text-muted">
@@ -65,7 +121,7 @@ export default async function QcConsole() {
                     <td className="px-4 py-2 text-right">{variance != null ? `${variance > 0 ? "+" : ""}${variance.toFixed(1)}pp` : "—"}</td>
                     <td className="px-4 py-2 text-muted">{del?.reference ?? "—"}</td>
                     <td className="px-4 py-2">
-                      {del ? <QcDecisionForm deliveryId={del.id} /> : <span className="text-xs text-muted">no delivery</span>}
+                      {!canDecide ? <span className="text-xs text-muted">QC decides</span> : del ? <QcDecisionForm deliveryId={del.id} /> : <span className="text-xs text-muted">no delivery</span>}
                     </td>
                   </tr>
                 );
