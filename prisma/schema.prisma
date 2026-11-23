@@ -60,6 +60,12 @@ enum MinerTier {
   NOT_ONBOARDED
 }
 
+// FR-05: separate checklists for artisanal/small-scale vs large-scale/corporate.
+enum MinerScale {
+  ARTISANAL
+  CORPORATE
+}
+
 enum MinerDocumentState {
   ON_FILE
   EXPIRED
@@ -232,6 +238,8 @@ model Miner {
   siteDescription      String?
   siteLatitude         Decimal?        @db.Decimal(9, 6)
   siteLongitude        Decimal?        @db.Decimal(9, 6)
+  scale                MinerScale      @default(ARTISANAL)
+  commodities          String[]        @default([])
   tier                 MinerTier       @default(NOT_ONBOARDED)
   // Vetting sub-scores (FRD FR-03). Rubric/thresholds are app config.
   scoreLegal           Int?

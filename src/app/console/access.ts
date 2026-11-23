@@ -11,7 +11,7 @@ export type NavItem = { key: string; label: string; href: string | null };
 // href null = modeled in the schema but no UI yet (rendered greyed "not built").
 export const NAV: NavItem[] = [
   { key: "action-queue", label: "Action queue", href: "/console" },
-  { key: "suppliers", label: "Suppliers", href: null },
+  { key: "suppliers", label: "Suppliers", href: "/console/suppliers" },
   { key: "procurement", label: "Procurement", href: "/console/procurement" },
   { key: "qc", label: "Receiving & QC", href: "/console/qc" },
   { key: "inventory", label: "Inventory", href: "/console/inventory" },
@@ -62,6 +62,7 @@ export function canAccess(role: string, moduleKey: string): boolean {
 // An unbuilt segment maps to its own key (denied unless the role allows it).
 const PATH_MODULE: Record<string, string> = {
   "": "action-queue",
+  suppliers: "suppliers",
   procurement: "procurement",
   qc: "qc",
   inventory: "inventory",
