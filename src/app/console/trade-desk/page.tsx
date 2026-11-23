@@ -261,7 +261,8 @@ export default async function TradeDesk({ searchParams }: PageProps<"/console/tr
                     )}
                   </td>
                   <td className="px-4 py-2"><div className="flex flex-col gap-2">
-                    {so.status === "CONFIRMED" && (
+                    {(so.status === "CONFIRMED" || so.status === "PARTIAL") &&
+                      so.orderedQuantity.sub(so.dispatchedQuantity).sub(so.reservedQuantity).gt(0) && (
                       <ActionForm action={reReserveOrderAction} success="Stock reserved.">
                         <input type="hidden" name="soId" value={so.id} />
                         <Submit>Re-reserve</Submit>

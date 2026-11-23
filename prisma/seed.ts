@@ -290,11 +290,11 @@ async function main() {
       await prisma.reservation.update({ where: { id: batchResv[o.batch].id }, data: { salesOrderId: so.id } });
     }
     await prisma.shipment.create({
-      data: { reference: o.ship.ref, direction: "OUTBOUND", status: o.ship.status as any, salesOrderId: so.id, carrier: "Dangote Haulage", route: "Lagos FZ → Kaduna", trackingRef: `DH-${o.ship.ref.slice(-4)}`, expectedAt: d("2026-09-28"), podReference: o.ship.pod },
+      data: { reference: o.ship.ref, direction: "OUTBOUND", status: o.ship.status as any, salesOrderId: so.id, carrier: "Dangote Haulage", route: "Lagos FZ → Kaduna", trackingRef: `DH-${o.ship.ref.slice(-4)}`, quantity: dec(o.dispatched), expectedAt: d("2026-09-28"), podReference: o.ship.pod },
     });
     if (o.inv) {
       await prisma.invoice.create({
-        data: { reference: o.inv.ref, salesOrderId: so.id, status: o.inv.status as any, amount: dec(m(o.unit) * o.invoiced), amountPaid: dec(m(o.unit) * o.paid), terms: "30% deposit · 70% on delivery", externalRef: `QB-${o.inv.ref}` },
+        data: { reference: o.inv.ref, salesOrderId: so.id, status: o.inv.status as any, amount: dec(m(o.unit) * o.invoiced), quantity: dec(o.invoiced), amountPaid: dec(m(o.unit) * o.paid), terms: "30% deposit · 70% on delivery", externalRef: `QB-${o.inv.ref}` },
       });
       if (o.paid > 0) {
         await prisma.payment.create({
