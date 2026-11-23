@@ -1,11 +1,13 @@
 import { Prisma, type MinerTier, type PurchaseOrderStatus, type QcDecisionType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { Actor } from "@/lib/reservations";
+import { blockingDocuments } from "@/lib/suppliers";
 
 export type ProcurementErrorCode =
   | "INVALID_QUANTITY"
   | "MINER_NOT_FOUND"
   | "MINER_NOT_APPROVED"
+  | "DOCUMENTS_BLOCKING"
   | "OVER_CAP"
   | "PO_NOT_FOUND"
   | "INVALID_STATE"
@@ -89,7 +91,7 @@ export async function createOffer(minerId: string, input: OfferInput, actor: Act
 
   const miner = await prisma.miner.findUnique({
     where: { id: minerId },
-    include: { organization: { select: { status: true } } },
+    include: { organization: { select: { status: true } }, documents: true },
   });
   if (!miner) throw new ProcurementError("MINER_NOT_FOUND");
   if (miner.organization.status !== "ACTIVE" || !OFFERABLE_TIERS.includes(miner.tier)) {
@@ -97,6 +99,10 @@ export async function createOffer(minerId: string, input: OfferInput, actor: Act
       "MINER_NOT_APPROVED",
       `Offers require an active, approved supplier; ${miner.reference} is ${miner.tier} / ${miner.organization.status}.`,
     );
+  }
+  const blocking = blockingDocuments(miner.documents);
+  if (blocking.length) {
+    throw new ProcurementError("DOCUMENTS_BLOCKING", `${miner.reference} has documents not on file or expired: ${blocking.join(", ")}.`);
   }
   if (miner.monthlyCapTonnes && qty.gt(miner.monthlyCapTonnes)) {
     throw new ProcurementError(
