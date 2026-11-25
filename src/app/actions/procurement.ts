@@ -4,7 +4,7 @@ import type { QcDecisionType } from "@prisma/client";
 import { revalidatePath } from "next/cache";
 import { AuthError } from "@/lib/auth";
 import { authorizeFor } from "@/lib/audit";
-import { ProcurementError, createOffer, recordQcDecision } from "@/lib/procurement";
+import { ProcurementError, acceptOffer, createOffer, receiveDelivery, recordQcDecision } from "@/lib/procurement";
 
 export type ActionResult<T = void> =
   | ({ ok: true } & T)
@@ -66,6 +66,52 @@ export async function recordQcDecisionAction(formData: FormData): Promise<Action
   }
 }
 
-// acceptOffer + receiveDelivery follow the same thin-wrapper pattern (roles:
-// MINER/PROCUREMENT for acceptance, WAREHOUSE_LOGISTICS/QUALITY for receiving);
-// add them when the console screens that call them are built.
+const str = (fd: FormData, k: string) => String(fd.get(k) ?? "").trim();
+
+// Procurement records the miner's acceptance of an offer (FR-11).
+export async function acceptOfferAction(formData: FormData): Promise<ActionResult<object>> {
+  const poId = str(formData, "purchaseOrderId");
+  try {
+    const actor = await authorizeFor({ action: "offer.accept", recordType: "PurchaseOrder", recordId: poId }, "PROCUREMENT", "ADMIN");
+    await acceptOffer(poId, actor, str(formData, "reason") || undefined);
+    revalidatePath("/console/procurement");
+    revalidatePath("/console/qc");
+    return { ok: true };
+  } catch (e) {
+    return toFailure(e);
+  }
+}
+
+// Warehouse / QC record a (possibly partial) delivery with its weighbridge figure and assay (FR-13/16).
+export async function receiveDeliveryAction(formData: FormData): Promise<ActionResult<{ reference: string }>> {
+  const poId = str(formData, "purchaseOrderId");
+  try {
+    const actor = await authorizeFor(
+      { action: "delivery.receive", recordType: "PurchaseOrder", recordId: poId },
+      "WAREHOUSE_LOGISTICS",
+      "QUALITY_COMPLIANCE",
+      "ADMIN",
+    );
+    const { delivery } = await receiveDelivery(
+      poId,
+      {
+        declaredQuantity: str(formData, "declaredQuantity"),
+        verifiedQuantity: str(formData, "verifiedQuantity"),
+        location: str(formData, "location"),
+        assay: {
+          testedGrade: str(formData, "testedGrade"),
+          laboratory: str(formData, "laboratory") || undefined,
+          sampleReference: str(formData, "sampleReference") || undefined,
+        },
+        reason: str(formData, "reason") || undefined,
+      },
+      actor,
+    );
+    revalidatePath("/console/procurement");
+    revalidatePath("/console/qc");
+    revalidatePath("/console/inventory");
+    return { ok: true, reference: delivery.reference };
+  } catch (e) {
+    return toFailure(e);
+  }
+}

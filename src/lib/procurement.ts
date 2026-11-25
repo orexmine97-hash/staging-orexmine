@@ -1,6 +1,7 @@
 import { Prisma, type MinerTier, type PurchaseOrderStatus, type QcDecisionType } from "@prisma/client";
 import { prisma } from "@/lib/prisma";
 import type { Actor } from "@/lib/reservations";
+import { minerBalance } from "@/lib/finance";
 import { blockingDocuments } from "@/lib/suppliers";
 
 export type ProcurementErrorCode =
@@ -12,7 +13,9 @@ export type ProcurementErrorCode =
   | "PO_NOT_FOUND"
   | "INVALID_STATE"
   | "DELIVERY_NOT_FOUND"
-  | "NO_HELD_BATCH";
+  | "NO_HELD_BATCH"
+  | "OFFER_EXPIRED"
+  | "FULLY_DELIVERED";
 
 export class ProcurementError extends Error {
   constructor(
@@ -26,8 +29,9 @@ export class ProcurementError extends Error {
 
 // FRD 2.2 / FR-10: only active, approved suppliers may receive offers.
 const OFFERABLE_TIERS: MinerTier[] = ["PREFERRED", "CONDITIONAL"];
-// FR-13: a PO may take deliveries once accepted (and while still open).
-const RECEIVABLE_STATES: PurchaseOrderStatus[] = ["ACCEPTED", "IN_TRANSIT", "RECEIVED"];
+// FR-13: a PO takes deliveries from acceptance until its quantity is delivered —
+// including after earlier deliveries were QC'd or paid (partial deliveries).
+export const RECEIVABLE_STATES: PurchaseOrderStatus[] = ["ACCEPTED", "IN_TRANSIT", "RECEIVED", "QC_HOLD", "QC_PASSED", "QC_FAILED", "PAYABLE", "PAID"];
 const COMMODITY_CODE: Record<string, string> = { gold: "GC", tin: "CS", coltan: "CT", leadzinc: "LZ" };
 
 const TX_OPTS = { timeout: 15_000, maxWait: 10_000 };
@@ -133,16 +137,38 @@ export async function createOffer(minerId: string, input: OfferInput, actor: Act
   });
 }
 
+// Outstanding = declared − verified tonnes on every delivery not failed at QC.
+// A failed delivery doesn't fulfil the PO, so the miner can replace it.
+type DeliveryQty = { verifiedQuantity: Prisma.Decimal | null; qcDecisions: { decision: QcDecisionType }[] };
+export function outstandingQuantity(declared: Prisma.Decimal, deliveries: DeliveryQty[]): Prisma.Decimal {
+  const counted = deliveries
+    .filter((d) => !d.qcDecisions.some((q) => q.decision === "FAIL"))
+    .reduce((s, d) => s.add(d.verifiedQuantity ?? 0), new Prisma.Decimal(0));
+  return declared.sub(counted);
+}
+
+// PO status across all its deliveries: any undecided → QC_HOLD; else any passed → QC_PASSED; else QC_FAILED.
+export function rollUpQc(batchStatuses: string[]): PurchaseOrderStatus {
+  if (batchStatuses.includes("QC_HOLD")) return "QC_HOLD";
+  return batchStatuses.some((s) => s !== "QC_FAIL") ? "QC_PASSED" : "QC_FAILED";
+}
+
 // ── Acceptance (FR-11) ───────────────────────────────────────
-export async function acceptOffer(purchaseOrderId: string, actor: Actor) {
+// ponytail: staff record the miner's acceptance (call / signed offer ref) until the miner portal exists.
+export async function acceptOffer(purchaseOrderId: string, actor: Actor, reason?: string) {
   return prisma.$transaction(async (tx) => {
     const po = await tx.purchaseOrder.findUnique({ where: { id: purchaseOrderId } });
     if (!po) throw new ProcurementError("PO_NOT_FOUND");
     if (po.status !== "OFFERED") {
       throw new ProcurementError("INVALID_STATE", `PO is ${po.status}; only an OFFERED order can be accepted.`);
     }
-    const updated = await tx.purchaseOrder.update({ where: { id: purchaseOrderId }, data: { status: "ACCEPTED" } });
-    await audit(tx, actor, "Purchase order accepted", "PurchaseOrder", po.reference, "Offered", "Accepted");
+    if (po.validUntil && po.validUntil < new Date()) {
+      throw new ProcurementError("OFFER_EXPIRED", `${po.reference} expired ${po.validUntil.toISOString().slice(0, 10)}; issue a new offer.`);
+    }
+    const accepted = await tx.purchaseOrder.updateMany({ where: { id: purchaseOrderId, status: "OFFERED" }, data: { status: "ACCEPTED" } });
+    if (accepted.count === 0) throw new ProcurementError("INVALID_STATE", `${po.reference} changed; reload.`);
+    const updated = { ...po, status: "ACCEPTED" as const };
+    await audit(tx, actor, "Purchase order accepted", "PurchaseOrder", po.reference, "Offered", "Accepted", reason);
     return updated;
   });
 }
@@ -167,16 +193,33 @@ export interface ReceiveInput {
 }
 
 export async function receiveDelivery(purchaseOrderId: string, input: ReceiveInput, actor: Actor) {
-  const declared = new Prisma.Decimal(input.declaredQuantity);
-  const verified = new Prisma.Decimal(input.verifiedQuantity);
-  if (verified.lte(0)) throw new ProcurementError("INVALID_QUANTITY", "Verified quantity must be positive.");
+  const num = (v: Prisma.Decimal.Value, what: string) => {
+    try {
+      return new Prisma.Decimal(v);
+    } catch {
+      throw new ProcurementError("INVALID_QUANTITY", `${what} must be a number.`);
+    }
+  };
+  const declared = num(input.declaredQuantity, "Declared quantity");
+  const verified = num(input.verifiedQuantity, "Verified quantity");
+  const grade = num(input.assay.testedGrade, "Assayed grade");
+  if (declared.lte(0) || verified.lte(0)) throw new ProcurementError("INVALID_QUANTITY", "Declared and verified quantities must be positive.");
+  if (grade.lt(0) || grade.gt(100)) throw new ProcurementError("INVALID_QUANTITY", "Assayed grade must be 0–100%.");
+  if (!input.location.trim()) throw new ProcurementError("INVALID_QUANTITY", "Record the custody location.");
 
   return prisma.$transaction(async (tx) => {
-    const po = await tx.purchaseOrder.findUnique({ where: { id: purchaseOrderId } });
+    // Row lock serializes receipts on one PO so two can't both see the same outstanding.
+    await tx.$queryRaw`SELECT id FROM "PurchaseOrder" WHERE id = ${purchaseOrderId} FOR UPDATE`;
+    const po = await tx.purchaseOrder.findUnique({
+      where: { id: purchaseOrderId },
+      include: { deliveries: { include: { qcDecisions: { select: { decision: true } } } } },
+    });
     if (!po) throw new ProcurementError("PO_NOT_FOUND");
     if (!RECEIVABLE_STATES.includes(po.status)) {
       throw new ProcurementError("INVALID_STATE", `PO is ${po.status}; accept it before recording a delivery.`);
     }
+    const open = outstandingQuantity(po.declaredQuantity, po.deliveries);
+    if (open.lte(0)) throw new ProcurementError("FULLY_DELIVERED", `${po.reference} is fully delivered.`);
 
     const delivery = await tx.delivery.create({
       data: {
@@ -196,7 +239,7 @@ export async function receiveDelivery(purchaseOrderId: string, input: ReceiveInp
         deliveryId: delivery.id,
         laboratory: input.assay.laboratory,
         sampleReference: input.assay.sampleReference,
-        testedGrade: new Prisma.Decimal(input.assay.testedGrade),
+        testedGrade: grade,
         purity: input.assay.purity != null ? new Prisma.Decimal(input.assay.purity) : null,
         contaminants: input.assay.contaminants,
         assayDate: input.assay.assayDate ?? new Date(),
@@ -206,7 +249,7 @@ export async function receiveDelivery(purchaseOrderId: string, input: ReceiveInp
       data: {
         batchNumber: batchNumber(po.commodity),
         commodity: po.commodity,
-        grade: new Prisma.Decimal(input.assay.testedGrade),
+        grade,
         location: input.location,
         status: "QC_HOLD",
         quantity: verified,
@@ -236,7 +279,8 @@ export async function receiveDelivery(purchaseOrderId: string, input: ReceiveInp
       : verified.gt(declared)
         ? ` · excess ${verified.sub(declared)}`
         : "";
-    await audit(tx, actor, "Delivery received", "Delivery", delivery.reference, `declared ${declared}`, `verified ${verified}${gap} · ${batch.batchNumber} (QC hold)`, input.reason);
+    const left = open.sub(verified);
+    await audit(tx, actor, "Delivery received", "Delivery", delivery.reference, `declared ${declared}`, `verified ${verified}${gap} · ${batch.batchNumber} (QC hold) · PO outstanding ${left.gt(0) ? left : 0}`, input.reason);
     return { delivery, assay, batch };
   }, TX_OPTS);
 }
@@ -263,10 +307,8 @@ export async function recordQcDecision(
     const tested = delivery.assays[0]?.testedGrade ?? null;
     const variance = tested != null && delivery.declaredGrade != null ? tested.sub(delivery.declaredGrade) : null;
 
-    let poStatus: PurchaseOrderStatus;
     let after: string;
     if (decision === "PASS") {
-      poStatus = "QC_PASSED";
       await tx.inventoryBatch.update({
         where: { id: batch.id },
         data: { status: "SELLABLE", availableQuantity: batch.quantity, heldQuantity: 0 },
@@ -282,7 +324,6 @@ export async function recordQcDecision(
       });
       after = `SELLABLE · available ${batch.quantity}`;
     } else if (decision === "FAIL") {
-      poStatus = "QC_FAILED";
       await tx.inventoryBatch.update({
         where: { id: batch.id },
         data: { status: "QC_FAIL", rejectedQuantity: batch.quantity, heldQuantity: 0 },
@@ -290,7 +331,6 @@ export async function recordQcDecision(
       after = `QC_FAIL · rejected ${batch.quantity}`;
     } else {
       // HOLD or RETEST — stays quarantined, not sellable.
-      poStatus = "QC_HOLD";
       after = decision === "RETEST" ? "QC hold · retest ordered" : "QC hold";
     }
 
@@ -304,12 +344,21 @@ export async function recordQcDecision(
         decidedByName: actor.name,
       },
     });
-    // ponytail: single-delivery PO roll-up. Multi-delivery POs need status
-    // derived from all their deliveries — add when pooling/partial QC lands.
-    await tx.purchaseOrder.update({ where: { id: delivery.purchaseOrderId }, data: { status: poStatus } });
+    // Mark the delivery verified first so the payout balance below counts its tonnes as owed.
     if (decision === "PASS") {
       await tx.delivery.update({ where: { id: deliveryId }, data: { status: "VERIFIED" } });
     }
+    const siblings = await tx.inventoryBatch.findMany({
+      where: { sourceDelivery: { purchaseOrderId: delivery.purchaseOrderId } },
+      select: { status: true },
+    });
+    let poStatus = rollUpQc(siblings.map((b) => b.status));
+    if (poStatus === "QC_PASSED") {
+      // Keep payout progress: a PO already part- or fully paid stays PAYABLE / PAID.
+      const { paid, owed } = await minerBalance(tx, delivery.purchaseOrderId);
+      if (paid.gt(0)) poStatus = paid.gte(owed) ? "PAID" : "PAYABLE";
+    }
+    await tx.purchaseOrder.update({ where: { id: delivery.purchaseOrderId }, data: { status: poStatus } });
     await audit(tx, actor, `QC decision — ${decision.toLowerCase()}`, "QcDecision", `${delivery.reference} / ${batch.batchNumber}`, `${batch.status} · held ${batch.quantity}`, after, opts.reason);
 
     return { qcDecision: qc, batchId: batch.id, batchStatus: decision === "PASS" ? "SELLABLE" : decision === "FAIL" ? "QC_FAIL" : "QC_HOLD" };
