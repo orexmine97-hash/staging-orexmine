@@ -1,6 +1,6 @@
 import { prisma } from "@/lib/prisma";
 import { fmtDate, fmtMoney, fmtPricePerT, fmtTonnes } from "@/lib/format";
-import { isOverdue } from "@/lib/finance";
+import { cashPosition, isOverdue } from "@/lib/finance";
 import { closeSalesOrderAction, issueInvoiceAction, recordBuyerPaymentAction, recordMinerPayoutAction } from "@/app/actions/finance";
 import { Badge } from "../ui";
 import { ActionForm, Submit } from "../action-form";
@@ -36,38 +36,18 @@ function Stat({ label, value, tone }: { label: string; value: string; tone?: "ba
 // Receivables, miner obligations and close-out (FR-48/50/51/68).
 export default async function Finance() {
   const now = new Date();
-  const [delivered, invoices, pos, paid] = await Promise.all([
+  const [delivered, cash, paid] = await Promise.all([
     prisma.salesOrder.findMany({
       where: { deliveredQuantity: { gt: 0 }, status: { notIn: ["CANCELLED", "CLOSED"] } },
       orderBy: { confirmedAt: "asc" },
       include: buyerName,
     }),
-    prisma.invoice.findMany({
-      where: { status: { in: ["ISSUED", "PART_PAID"] } },
-      orderBy: { dueAt: "asc" },
-      include: { salesOrder: { include: buyerName } },
-    }),
-    prisma.purchaseOrder.findMany({
-      where: { status: { in: ["QC_PASSED", "PAYABLE"] } },
-      orderBy: { updatedAt: "asc" },
-      include: { miner: { include: { organization: { select: { name: true } } } }, deliveries: { where: { status: "VERIFIED" } }, payouts: true },
-    }),
+    cashPosition(now),
     prisma.salesOrder.findMany({ where: { status: "PAID" }, include: buyerName }),
   ]);
 
   const toInvoice = delivered.filter((so) => so.deliveredQuantity.gt(so.invoicedQuantity));
-  const outstanding = (i: (typeof invoices)[number]) => Number(i.amount) - Number(i.amountPaid);
-  const receivable = invoices.reduce((s, i) => s + outstanding(i), 0);
-  const overdue = invoices.filter((i) => isOverdue(i, now)).reduce((s, i) => s + outstanding(i), 0);
-  // Same rule as minerBalance(): verified tonnes × PO price, less payouts.
-  const payables = pos
-    .map((po) => {
-      const owed = po.deliveries.reduce((s, d) => s + Number(d.verifiedQuantity ?? 0), 0) * Number(po.unitPrice);
-      const out = owed - po.payouts.reduce((s, p) => s + Number(p.amount), 0);
-      return { po, owed, out };
-    })
-    .filter((p) => p.out > 0.005);
-  const owedMiners = payables.reduce((s, p) => s + p.out, 0);
+  const { invoices, outstanding, receivable, overdue, payables, owedMiners } = cash;
 
   return (
     <div className="flex flex-col gap-10">
