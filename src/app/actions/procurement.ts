@@ -22,7 +22,7 @@ function toFailure(e: unknown): { ok: false; code: string; message: string } {
 }
 
 // Procurement Officer issues offers (FR-09/10).
-export async function createOfferAction(formData: FormData): Promise<ActionResult<{ purchaseOrderId: string }>> {
+export async function createOfferAction(formData: FormData): Promise<ActionResult<{ purchaseOrderId: string; reference: string }>> {
   const minerId = String(formData.get("minerId") ?? "");
   const commodity = String(formData.get("commodity") ?? "");
   const quantity = String(formData.get("quantity") ?? "");
@@ -38,7 +38,8 @@ export async function createOfferAction(formData: FormData): Promise<ActionResul
     );
     const po = await createOffer(minerId, { commodity, quantity, unitPrice, grade, reason }, actor);
     revalidatePath("/console/procurement");
-    return { ok: true, purchaseOrderId: po.id };
+    revalidatePath("/console/suppliers");
+    return { ok: true, purchaseOrderId: po.id, reference: po.reference };
   } catch (e) {
     return toFailure(e);
   }
