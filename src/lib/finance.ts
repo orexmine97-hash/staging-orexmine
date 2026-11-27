@@ -43,6 +43,37 @@ export function isOverdue(inv: { status: string; dueAt: Date | null }, now = new
   return (inv.status === "ISSUED" || inv.status === "PART_PAID") && inv.dueAt != null && inv.dueAt < now;
 }
 
+// Open receivables and miner obligations (FR-68). Shared by Finance and Reports.
+const buyerName = { buyer: { include: { organization: { select: { name: true } } } } } as const;
+export async function cashPosition(now = new Date()) {
+  const [invoices, pos] = await Promise.all([
+    prisma.invoice.findMany({
+      where: { status: { in: ["ISSUED", "PART_PAID"] } },
+      orderBy: { dueAt: "asc" },
+      include: { salesOrder: { include: buyerName } },
+    }),
+    prisma.purchaseOrder.findMany({
+      where: { status: { in: ["QC_PASSED", "PAYABLE"] } },
+      orderBy: { updatedAt: "asc" },
+      include: { miner: { include: { organization: { select: { name: true } } } }, deliveries: { where: { status: "VERIFIED" } }, payouts: true },
+    }),
+  ]);
+  const outstanding = (i: (typeof invoices)[number]) => Number(i.amount) - Number(i.amountPaid);
+  const receivable = invoices.reduce((s, i) => s + outstanding(i), 0);
+  const overdueInvoices = invoices.filter((i) => isOverdue(i, now));
+  const overdue = overdueInvoices.reduce((s, i) => s + outstanding(i), 0);
+  // Same rule as minerBalance(): verified tonnes × PO price, less payouts.
+  const payables = pos
+    .map((po) => {
+      const owed = po.deliveries.reduce((s, d) => s + Number(d.verifiedQuantity ?? 0), 0) * Number(po.unitPrice);
+      const out = owed - po.payouts.reduce((s, p) => s + Number(p.amount), 0);
+      return { po, owed, out };
+    })
+    .filter((p) => p.out > 0.005);
+  const owedMiners = payables.reduce((s, p) => s + p.out, 0);
+  return { invoices, outstanding, receivable, overdueInvoices, overdue, payables, owedMiners, exposure: receivable - owedMiners };
+}
+
 // ── Buyer invoicing (FR-50) ──────────────────────────────────
 export interface InvoiceInput {
   dueDays?: number;
